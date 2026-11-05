@@ -1,6 +1,6 @@
 # Qwen3-ASR TensorRT
 
-Windows-first Qwen3-ASR inference for NVIDIA GPUs. The first implementation milestone provides a BF16 reference runtime and a language-neutral HTTP interface. TensorRT encoder and ExLlamaV3 decoder backends are not connected yet.
+Windows-first Qwen3-ASR inference for NVIDIA GPUs. The project keeps a BF16 Transformers reference path and adds a TensorRT BF16 audio encoder with an ExLlamaV3 Qwen3 text decoder. The HTTP interface is language-neutral.
 
 ## Setup
 
@@ -31,11 +31,43 @@ curl.exe -X POST "http://127.0.0.1:8000/v1/transcribe?language=Chinese" `
   -H "Content-Type: audio/wav" --data-binary "@audio.wav"
 ```
 
+## TensorRT + ExLlamaV3
+
+Build the BF16 TensorRT encoder engine and extract the text decoder weights into ExLlamaV3's Qwen3 layout:
+
+```powershell
+uv run qwen3-asr build
+```
+
+Run accelerated inference:
+
+```powershell
+uv run qwen3-asr transcribe .\audio.wav --backend tensorrt-exllama --language Chinese
+```
+
+Create an EXL3 decoder at a target bitrate. A recipe file can assign different bitrates to different tensors for mixed precision:
+
+```powershell
+uv run qwen3-asr quantize --bits 4
+uv run qwen3-asr quantize --bits 8 --output-dir artifacts/qwen3-asr-0.6b/decoder-exl3-8bpw
+uv run qwen3-asr quantize --bits 4 --recipe .\recipes\mixed.yml --output-dir artifacts/qwen3-asr-0.6b/decoder-exl3-mixed
+```
+
+The encoder build currently provides BF16 and FP16 TensorRT engines. EXL3 provides 4/8 bpw and recipe-based mixed precision for the decoder; an INT8 TensorRT calibration path still needs a representative calibration set and is kept separate from EXL3 quantization.
+
+Run the HTTP API with the accelerated backend:
+
+```powershell
+uv run qwen3-asr serve --backend tensorrt-exllama
+```
+
+The build uses the selected Hugging Face checkpoint. It writes ONNX, TensorRT engine, and extracted decoder files under `artifacts/qwen3-asr-0.6b` by default. Engine files are hardware and TensorRT-version specific and should be built on the target machine.
+
 The API accepts WAV, MP3, FLAC, OGG, M4A, and AAC content types, limits uploads to 128 MiB, and binds to loopback by default. Use `--host 0.0.0.0` only when remote clients should connect.
 
 ## Current scope
 
-The reference runtime loads `Qwen/Qwen3-ASR-0.6B-hf` in BF16 on `cuda:0`. It establishes the transcription and API contract for later accelerated backends. TensorRT engine export/build, ExLlamaV3 integration, Linux packaging, and single-file packaging remain subsequent implementation work.
+The reference runtime loads `Qwen/Qwen3-ASR-0.6B-hf` in BF16 on `cuda:0`. The accelerated runtime uses a BF16 TensorRT encoder engine; ExLlamaV3 runs the extracted Qwen3 text decoder using its supported FP16/EXL3 paths. The BF16 reference remains available for output comparison. Windows is the first target; the same Python API and CLI are intended for Linux where matching CUDA, TensorRT, and ExLlamaV3 packages are installed.
 
 The initial smoke check ran on an NVIDIA GeForce RTX 4060 Laptop GPU with CUDA 12.8 and confirmed BF16 model loading and generation. It used one second of silence, so it validates the runtime path rather than recognition quality.
 
