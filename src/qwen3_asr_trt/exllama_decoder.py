@@ -21,12 +21,15 @@ def export_text_model(source: str, output_dir: Path) -> Path:
         raise ValueError(f"Expected a Qwen3-ASR checkpoint, got {source_config.get('model_type')!r}")
 
     output_dir.mkdir(parents=True, exist_ok=True)
-    config = dict(source_config["text_config"])
+    thinker_config = source_config.get("thinker_config", source_config)
+    config = dict(thinker_config.get("text_config", source_config.get("text_config", {})))
+    if not config:
+        raise ValueError("Checkpoint does not contain a Qwen3 text configuration")
     config["architectures"] = ["Qwen3ForCausalLM"]
     config["model_type"] = "qwen3"
-    config["tie_word_embeddings"] = source_config.get("tie_word_embeddings", True)
-    config["eos_token_id"] = source_config.get("eos_token_id", [151643, 151645])
-    config["pad_token_id"] = source_config.get("pad_token_id", 151645)
+    config["tie_word_embeddings"] = thinker_config.get("tie_word_embeddings", source_config.get("tie_word_embeddings", True))
+    config["eos_token_id"] = thinker_config.get("eos_token_id", source_config.get("eos_token_id", [151643, 151645]))
+    config["pad_token_id"] = thinker_config.get("pad_token_id", source_config.get("pad_token_id", 151645))
     with (output_dir / "config.json").open("w", encoding="utf-8") as stream:
         json.dump(config, stream, indent=2)
 
@@ -37,9 +40,13 @@ def export_text_model(source: str, output_dir: Path) -> Path:
     for shard in shard_files:
         with safe_open(shard, framework="pt", device="cpu") as checkpoint:
             for key in checkpoint.keys():
-                prefix = "model.language_model."
-                if key.startswith(prefix):
-                    weights["model." + key[len(prefix):]] = checkpoint.get_tensor(key).contiguous()
+                for prefix in ("model.language_model.", "thinker.model."):
+                    if key.startswith(prefix):
+                        weights["model." + key[len(prefix):]] = checkpoint.get_tensor(key).contiguous()
+                        break
+                else:
+                    if key == "thinker.lm_head.weight":
+                        weights["lm_head.weight"] = checkpoint.get_tensor(key).contiguous()
     if not weights:
         raise ValueError(f"No Qwen3 language-model weights found in {source_dir}")
     save_file(weights, str(output_dir / "model.safetensors"))

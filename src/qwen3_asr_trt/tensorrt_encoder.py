@@ -13,7 +13,7 @@ class StaticAudioWindow:
             def __init__(self) -> None:
                 super().__init__()
                 self.audio_tower = audio_tower
-                self.projector = projector
+                self.projector = projector if projector is not None else nn.Identity()
                 self.frames_per_chunk = audio_tower.config.n_window * 2
                 self.window_frames = audio_tower.config.n_window_infer
                 if self.window_frames % self.frames_per_chunk:
@@ -105,13 +105,32 @@ def export_encoder(model_id: str, output_path: Path, precision: str = "bf16") ->
     dtypes = {"bf16": torch.bfloat16, "fp16": torch.float16}
     if precision not in dtypes:
         raise ValueError(f"Unsupported encoder precision: {precision}")
-    model = AutoModelForMultimodalLM.from_pretrained(
+    model, loading_info = AutoModelForMultimodalLM.from_pretrained(
         model_id,
         dtype=dtypes[precision],
-        device_map="cuda:0",
-    ).eval()
-    tower = model.model.audio_tower
-    wrapper = StaticAudioWindow(tower, model.model.multi_modal_projector).eval()
+        device_map="cpu",
+        output_loading_info=True,
+    )
+    model.eval()
+    expected_audio = {
+        key for key in model.state_dict()
+        if ".audio_tower." in key or ".multi_modal_projector." in key
+    }
+    missing_audio = expected_audio.intersection(loading_info["missing_keys"])
+    unexpected_audio = {
+        key for key in loading_info["unexpected_keys"]
+        if ".audio_tower." in key or ".multi_modal_projector." in key
+    }
+    if missing_audio or unexpected_audio:
+        raise RuntimeError(
+            "Checkpoint audio weights did not load correctly; "
+            f"missing={sorted(missing_audio)[:5]}, "
+            f"unexpected={sorted(unexpected_audio)[:5]}"
+        )
+    thinker = getattr(model, "thinker", getattr(model, "model", model))
+    tower = thinker.audio_tower
+    projector = getattr(thinker, "multi_modal_projector", None)
+    wrapper = StaticAudioWindow(tower, projector).eval().to("cuda:0")
     frames = wrapper.window_frames
     sample_features = torch.zeros((1, 128, frames), dtype=torch.float32, device="cuda")
     sample_mask = torch.ones((1, frames), dtype=torch.int32, device="cuda")

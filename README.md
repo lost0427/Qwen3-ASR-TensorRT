@@ -53,7 +53,13 @@ uv run qwen3-asr quantize --bits 8 --output-dir artifacts/qwen3-asr-0.6b/decoder
 uv run qwen3-asr quantize --bits 4 --recipe .\recipes\mixed.yml --output-dir artifacts/qwen3-asr-0.6b/decoder-exl3-mixed
 ```
 
-The encoder build currently provides BF16 and FP16 TensorRT engines. EXL3 provides 4/8 bpw and recipe-based mixed precision for the decoder; an INT8 TensorRT calibration path still needs a representative calibration set and is kept separate from EXL3 quantization.
+The encoder build supports BF16 and FP16 exports and can build an engine from a calibrated INT8 Q/DQ ONNX file. For INT8, first place `encoder-window.int8.onnx` and its external data file under the selected artifact directory, then run:
+
+```powershell
+uv run qwen3-asr --model Qwen/Qwen3-ASR-1.7B-hf build --encoder-precision int8
+```
+
+The current 1.7B INT8 ONNX was calibrated from 32 speech clips (47 encoder windows); eligible operations use INT8 Q/DQ and the remaining operations retain FP16. EXL3 provides 3/4 bpw and recipe-based mixed precision for the decoder.
 
 Run the HTTP API with the accelerated backend:
 
@@ -63,32 +69,39 @@ uv run qwen3-asr serve --backend tensorrt-exllama
 
 The build uses the selected Hugging Face checkpoint. It writes ONNX, TensorRT engine, and extracted decoder files under `artifacts/qwen3-asr-0.6b` by default. Engine files are hardware and TensorRT-version specific and should be built on the target machine.
 
+Pass `--model Qwen/Qwen3-ASR-1.7B-hf` before the subcommand to build the Transformers-compatible 1.7B checkpoint; its artifacts are kept separately under `artifacts/qwen3-asr-1.7b`:
+
+```powershell
+uv run qwen3-asr --model Qwen/Qwen3-ASR-1.7B-hf build
+```
+
+The same model selection controls the default model-specific paths for `transcribe`, `benchmark`, and `quantize`.
+
 ## Benchmark
 
 Run the same audio repeatedly after model load and warmup:
 
 ```powershell
-uv run qwen3-asr benchmark "path/to/sample.wav" --backend tensorrt-exllama --decoder-dir artifacts/qwen3-asr-0.6b/decoder-exl3-4bpw --warmups 2 --repeats 10
+uv run qwen3-asr --model Qwen/Qwen3-ASR-1.7B-hf benchmark "path/to/sample.wav" --backend tensorrt-exllama --decoder-dir artifacts/qwen3-asr-1.7b/decoder-exl3-3bpw --warmups 2 --repeats 10
 ```
 
-On the RTX 4060 desktop, both projects were measured on the same 23.86-second ASRbenchmark sample with 2 warmups and 10 repeats. The current run measured this project at 387.2 ms median (BF16 TensorRT encoder + EXL3 4 bpw decoder) and Qwen3-ASR-GGUF at 810.5 ms (DML + Vulkan, Q4_K decoder).
+### RTX 4060 Laptop comparison
 
-| Stage | This project | Qwen3-ASR-GGUF | Faster |
-| --- | ---: | ---: | ---: |
-| Encoder | 15.2 ms | 177.2 ms | 11.7x |
-| Decoder prefill | included below | 78.3 ms | |
-| Decoder token generation | included below | 541.5 ms | |
-| Decoder total | 360.7 ms | 619.8 ms | 1.72x |
-| Other / preprocessing | 11.4 ms | 10.9 ms | |
-| End-to-end median | 387.2 ms | 810.5 ms | 2.09x |
+Both backends used the same Qwen3-ASR 1.7B checkpoint and the same 23.86-second LibriSpeech test-clean sample. TensorRT results use the EXL3 3 bpw decoder; the INT8 path uses the calibrated encoder described above. Times are medians over 10 repetitions after 2 warmups. GGUF used DML+Vulkan. This is a laptop GPU result, not a desktop RTX 4060 result.
 
-The project decoder timing includes ExLlamaV3 prompt processing and generation. GGUF decoder timing is its measured LLM prefill plus token generation. This compares different model configurations: Qwen3-ASR 0.6B with an EXL3 4 bpw decoder versus Qwen3-ASR 1.7B with a Q4_K decoder; it is not a same-size model comparison. Measurements are hardware-specific. INT8 TensorRT export still requires a representative calibration set and explicit ONNX Q/DQ quantization for TensorRT 11.4. Single-file packaging is deferred.
+| Backend | Preprocess | Encoder | Decoder prefill | Decoder generation | End to end |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Qwen3-ASR-GGUF | 10.5 ms other | 167.4 ms | 76.3 ms | 519.4 ms | 773.8 ms |
+| TensorRT BF16 + EXL3 3 bpw | 8.1 ms | 19.7 ms | 54.1 ms | 468.8 ms | 552.4 ms |
+| TensorRT INT8 + EXL3 3 bpw | 7.8 ms | 12.3 ms | 54.5 ms | 464.8 ms | 541.9 ms |
+
+On this sample, BF16 and INT8 TensorRT paths were 28.6% and 30.0% faster than GGUF, respectively. A paired 100-utterance LibriSpeech test-clean evaluation measured 2.49% WER (45/1806 word errors) for BF16 encoder + EXL3 3 bpw and 2.33% (42/1806) for INT8 encoder + the same decoder. INT8 won 8 utterances, tied 84, and lost 8 against BF16. The measured speed advantage applies to this laptop, model, decoder bitrate, and audio set; desktop performance remains unmeasured. Single-file packaging is deferred.
 
 The API accepts WAV, MP3, FLAC, OGG, M4A, and AAC content types, limits uploads to 128 MiB, and binds to loopback by default. Use `--host 0.0.0.0` only when remote clients should connect.
 
 ## Current scope
 
-The reference runtime loads `Qwen/Qwen3-ASR-0.6B-hf` in BF16 on `cuda:0`. The accelerated runtime uses a BF16 TensorRT encoder engine; ExLlamaV3 runs the extracted Qwen3 text decoder using its supported FP16/EXL3 paths. The BF16 reference remains available for output comparison. Windows is the first target; the same Python API and CLI are intended for Linux where matching CUDA, TensorRT, and ExLlamaV3 packages are installed.
+The reference runtime defaults to `Qwen/Qwen3-ASR-0.6B-hf` in BF16 on `cuda:0`. The accelerated runtime supports the 1.7B checkpoint with TensorRT BF16/FP16 or a calibrated INT8 encoder engine; ExLlamaV3 runs the extracted Qwen3 text decoder using its FP16/EXL3 paths. Pass `--model Qwen/Qwen3-ASR-1.7B-hf` when comparing against the 1.7B GGUF model. Windows is the first target; the same Python API and CLI are intended for Linux where matching CUDA, TensorRT, and ExLlamaV3 packages are installed.
 
 The initial smoke check ran on an NVIDIA GeForce RTX 4060 Laptop GPU with CUDA 12.8 and confirmed BF16 model loading and generation. It used one second of silence, so it validates the runtime path rather than recognition quality.
 

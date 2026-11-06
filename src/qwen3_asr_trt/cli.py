@@ -3,6 +3,7 @@ import json
 import logging
 import math
 from pathlib import Path
+import re
 import statistics
 import subprocess
 import sys
@@ -11,6 +12,25 @@ import time
 from .runtime import Bf16ReferenceTranscriber
 from .runtime import TensorRTExLlamaTranscriber
 from .server import serve
+
+
+def _artifact_dir(model_id: str) -> Path:
+    model_name = Path(model_id.rstrip("/\\")).name.lower()
+    if model_name.endswith("-hf"):
+        model_name = model_name[:-3]
+    return Path("artifacts") / model_name
+
+
+def _wer(reference: str, hypothesis: str) -> float:
+    normalize = lambda text: re.sub(r"\s+", " ", re.sub(r"[^A-Z0-9 ]", " ", text.upper())).strip().split()
+    expected, actual = normalize(reference), normalize(hypothesis)
+    previous = list(range(len(actual) + 1))
+    for i, token in enumerate(expected):
+        current = [i + 1]
+        for j, other in enumerate(actual):
+            current.append(min(current[-1] + 1, previous[j + 1] + 1, previous[j] + (token != other)))
+        previous = current
+    return previous[-1] / max(1, len(expected))
 
 
 def main() -> None:
@@ -24,15 +44,15 @@ def main() -> None:
     transcribe.add_argument("audio", type=Path)
     transcribe.add_argument("--language")
     transcribe.add_argument("--backend", choices=("bf16", "tensorrt-exllama"), default="bf16")
-    transcribe.add_argument("--decoder-dir", type=Path, default=Path("artifacts/qwen3-asr-0.6b/decoder"))
-    transcribe.add_argument("--engine", type=Path, default=Path("artifacts/qwen3-asr-0.6b/encoder-window.bf16.engine"))
+    transcribe.add_argument("--decoder-dir", type=Path)
+    transcribe.add_argument("--engine", type=Path)
 
     benchmark = commands.add_parser("benchmark")
     benchmark.add_argument("audio", type=Path)
     benchmark.add_argument("--language", default="English")
     benchmark.add_argument("--backend", choices=("bf16", "tensorrt-exllama"), default="tensorrt-exllama")
-    benchmark.add_argument("--decoder-dir", type=Path, default=Path("artifacts/qwen3-asr-0.6b/decoder"))
-    benchmark.add_argument("--engine", type=Path, default=Path("artifacts/qwen3-asr-0.6b/encoder-window.bf16.engine"))
+    benchmark.add_argument("--decoder-dir", type=Path)
+    benchmark.add_argument("--engine", type=Path)
     benchmark.add_argument("--warmups", type=int, default=2)
     benchmark.add_argument("--repeats", type=int, default=10)
 
@@ -40,22 +60,31 @@ def main() -> None:
     api.add_argument("--host", default="127.0.0.1")
     api.add_argument("--port", type=int, default=8000)
     api.add_argument("--backend", choices=("bf16", "tensorrt-exllama"), default="bf16")
-    api.add_argument("--decoder-dir", type=Path, default=Path("artifacts/qwen3-asr-0.6b/decoder"))
-    api.add_argument("--engine", type=Path, default=Path("artifacts/qwen3-asr-0.6b/encoder-window.bf16.engine"))
+    api.add_argument("--decoder-dir", type=Path)
+    api.add_argument("--engine", type=Path)
 
     build = commands.add_parser("build")
-    build.add_argument("--output-dir", type=Path, default=Path("artifacts/qwen3-asr-0.6b"))
+    build.add_argument("--output-dir", type=Path)
     build.add_argument("--workspace-gib", type=int, default=2)
-    build.add_argument("--encoder-precision", choices=("bf16", "fp16"), default="bf16")
+    build.add_argument("--encoder-precision", choices=("bf16", "fp16", "int8"), default="bf16")
 
     quantize = commands.add_parser("quantize")
-    quantize.add_argument("--input-dir", type=Path, default=Path("artifacts/qwen3-asr-0.6b/decoder"))
-    quantize.add_argument("--output-dir", type=Path, default=Path("artifacts/qwen3-asr-0.6b/decoder-exl3-4bpw"))
+    quantize.add_argument("--input-dir", type=Path)
+    quantize.add_argument("--output-dir", type=Path)
     quantize.add_argument("--work-dir", type=Path)
     quantize.add_argument("--bits", type=float, default=4.0)
     quantize.add_argument("--recipe", type=Path)
 
     args = parser.parse_args()
+    artifact_dir = _artifact_dir(args.model)
+    if args.command == "build":
+        args.output_dir = args.output_dir or artifact_dir
+    elif args.command == "quantize":
+        args.input_dir = args.input_dir or artifact_dir / "decoder"
+        args.output_dir = args.output_dir or artifact_dir / "decoder-exl3-4bpw"
+    else:
+        args.decoder_dir = args.decoder_dir or artifact_dir / "decoder"
+        args.engine = args.engine or artifact_dir / "encoder-window.bf16.engine"
     logging.basicConfig(
         level=logging.INFO if args.verbose else logging.WARNING,
         format="%(asctime)s %(levelname)s %(message)s",
@@ -68,7 +97,11 @@ def main() -> None:
         precision = args.encoder_precision
         onnx_path = args.output_dir / f"encoder-window.{precision}.onnx"
         engine_path = args.output_dir / f"encoder-window.{precision}.engine"
-        export_encoder(args.model, onnx_path, precision)
+        if precision == "int8":
+            if not onnx_path.is_file():
+                parser.error(f"INT8 encoder ONNX not found: {onnx_path}")
+        else:
+            export_encoder(args.model, onnx_path, precision)
         build_engine(onnx_path, engine_path, args.workspace_gib)
         export_text_model(args.model, args.output_dir / "decoder")
         return
@@ -147,6 +180,11 @@ def main() -> None:
             "rtf": statistics.median(times) / (audio_seconds * 1000),
             "text": samples[-1][1],
         }
+        reference_path = args.audio.with_suffix(".json")
+        if reference_path.is_file():
+            reference = json.loads(reference_path.read_text(encoding="utf-8")).get("reference")
+            if reference:
+                report["wer"] = _wer(reference, samples[-1][1])
         if stage_samples:
             report["stages"] = {
                 name: statistics.median(values) for name, values in stage_samples.items()

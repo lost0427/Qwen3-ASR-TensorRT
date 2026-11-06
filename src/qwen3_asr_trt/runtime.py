@@ -110,13 +110,14 @@ class TensorRTExLlamaTranscriber:
         )
         prompt = prompt.replace("<|audio_pad|>" * embeddings.shape[0], alias, 1)
         decoder_start = time.perf_counter()
-        output = self.generator.generate(
+        output, generation = self.generator.generate(
             prompt,
             max_new_tokens=self.max_new_tokens,
             stop_conditions=[151643, 151645],
             encode_special_tokens=True,
             completion_only=True,
             embeddings=[audio_embedding],
+            return_last_results=True,
         )
         torch.cuda.synchronize()
         total_ms = (time.perf_counter() - total_start) * 1000
@@ -125,6 +126,10 @@ class TensorRTExLlamaTranscriber:
             "preprocessingMs": preprocessing_ms,
             "encoderMs": encoder_ms,
             "decoderMs": decoder_ms,
+            "decoderPrefillMs": generation["time_prefill"] * 1000,
+            "decoderGenerationMs": generation["time_generate"] * 1000,
+            "promptTokens": generation["prompt_tokens"],
+            "decodeTokens": generation["new_tokens"],
             "otherMs": max(0.0, total_ms - preprocessing_ms - encoder_ms - decoder_ms),
             "totalMs": total_ms,
         }
