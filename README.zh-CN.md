@@ -1,6 +1,6 @@
 # Qwen3-ASR TensorRT
 
-面向 Windows、基于 TensorRT 音频编码器和 ExLlamaV3 EXL3 文本解码器的 Qwen3-ASR 1.7B 推理项目。本仓库集成 encoder 和 decoder，并提供 Python 命令行与 HTTP API。
+面向 Windows、基于 TensorRT 音频编码器和 ExLlamaV3 EXL3 文本解码器的 Qwen3-ASR 0.6B 与 1.7B 推理项目。本仓库集成 encoder 和 decoder，并提供 Python 命令行与 HTTP API。
 
 [English](README.md) | [简体中文](README.zh-CN.md) | [模型文件说明](model-cards/)
 
@@ -21,12 +21,14 @@ uv sync
 
 ## 模型
 
-基础模型为 [`Qwen/Qwen3-ASR-1.7B-hf`](https://huggingface.co/Qwen/Qwen3-ASR-1.7B-hf)。项目支持 BF16 和 FP16 TensorRT encoder、校准后的 INT8 Q/DQ encoder，以及 EXL3 3/4 bpw decoder。
+项目支持 [`Qwen/Qwen3-ASR-0.6B-hf`](https://huggingface.co/Qwen/Qwen3-ASR-0.6B-hf) 和 [`Qwen/Qwen3-ASR-1.7B-hf`](https://huggingface.co/Qwen/Qwen3-ASR-1.7B-hf)，提供 BF16、FP16 TensorRT encoder、校准后的 INT8 Q/DQ encoder，以及 EXL3 3/4 bpw decoder。
 
 已发布的模型文件：
 
 - [TensorRT encoder：BF16、FP16 和 INT8 ONNX](https://huggingface.co/Retrieve0/Qwen3-ASR-1.7B-TensorRT-Encoder)
 - [EXL3 decoder：3 bpw 和 4 bpw](https://huggingface.co/Retrieve0/Qwen3-ASR-1.7B-EXL3-Decoder)
+- [0.6B TensorRT encoder：BF16、FP16 和 INT8 ONNX](https://huggingface.co/Retrieve0/Qwen3-ASR-0.6B-TensorRT-Encoder)
+- [0.6B EXL3 decoder：3 bpw 和 4 bpw](https://huggingface.co/Retrieve0/Qwen3-ASR-0.6B-EXL3-Decoder)
 
 ## 构建加速后端
 
@@ -56,6 +58,8 @@ uv run qwen3-asr --model Qwen/Qwen3-ASR-1.7B-hf build --encoder-precision int8
 uv run qwen3-asr --model Qwen/Qwen3-ASR-1.7B-hf quantize --bits 3 --output-dir artifacts/qwen3-asr-1.7b/decoder-exl3-3bpw
 uv run qwen3-asr --model Qwen/Qwen3-ASR-1.7B-hf quantize --bits 4 --output-dir artifacts/qwen3-asr-1.7b/decoder-exl3-4bpw
 ```
+
+使用 0.6B 模型时，将命令中的模型 ID 替换为 `Qwen/Qwen3-ASR-0.6B-hf`，产物目录为 `artifacts/qwen3-asr-0.6b/`。
 
 TensorRT engine 会根据目标 GPU 和本机 TensorRT 环境在本地构建。
 
