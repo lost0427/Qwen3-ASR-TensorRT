@@ -53,13 +53,16 @@ uv run qwen3-asr quantize --bits 8 --output-dir artifacts/qwen3-asr-0.6b/decoder
 uv run qwen3-asr quantize --bits 4 --recipe .\recipes\mixed.yml --output-dir artifacts/qwen3-asr-0.6b/decoder-exl3-mixed
 ```
 
-The encoder build supports BF16 and FP16 exports and can build an engine from a calibrated INT8 Q/DQ ONNX file. For INT8, first place `encoder-window.int8.onnx` and its external data file under the selected artifact directory, then run:
+The encoder build supports BF16 and FP16 exports. To create a calibrated INT8 Q/DQ ONNX, install the optional quantization dependencies and provide a directory of representative audio files:
 
 ```powershell
+uv sync --extra quantization
+uv run qwen3-asr --model Qwen/Qwen3-ASR-1.7B-hf build --encoder-precision fp16
+uv run qwen3-asr --model Qwen/Qwen3-ASR-1.7B-hf quantize-encoder .\calibration-audio --max-audio-files 32
 uv run qwen3-asr --model Qwen/Qwen3-ASR-1.7B-hf build --encoder-precision int8
 ```
 
-The current 1.7B INT8 ONNX was calibrated from 32 speech clips (47 encoder windows); eligible operations use INT8 Q/DQ and the remaining operations retain FP16. EXL3 provides 3/4 bpw and recipe-based mixed precision for the decoder.
+Calibration uses the selected model's audio processor and fixed encoder windows. It applies symmetric INT8 Q/DQ to Conv and MatMul operations, with other operations retaining FP16. The command writes the ONNX and external weights under the model artifact directory. A 32-file LibriSpeech calibration run produced 52 encoder windows. EXL3 provides 3/4 bpw and recipe-based mixed precision for the decoder.
 
 Run the HTTP API with the accelerated backend:
 

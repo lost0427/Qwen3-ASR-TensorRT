@@ -75,6 +75,13 @@ def main() -> None:
     quantize.add_argument("--bits", type=float, default=4.0)
     quantize.add_argument("--recipe", type=Path)
 
+    quantize_encoder = commands.add_parser("quantize-encoder")
+    quantize_encoder.add_argument("calibration_audio_dir", type=Path)
+    quantize_encoder.add_argument("--input-onnx", type=Path)
+    quantize_encoder.add_argument("--output-onnx", type=Path)
+    quantize_encoder.add_argument("--max-audio-files", type=int, default=32)
+    quantize_encoder.add_argument("--language", default="English")
+
     args = parser.parse_args()
     artifact_dir = _artifact_dir(args.model)
     if args.command == "build":
@@ -82,6 +89,9 @@ def main() -> None:
     elif args.command == "quantize":
         args.input_dir = args.input_dir or artifact_dir / "decoder"
         args.output_dir = args.output_dir or artifact_dir / "decoder-exl3-4bpw"
+    elif args.command == "quantize-encoder":
+        args.input_onnx = args.input_onnx or artifact_dir / "encoder-window.fp16.onnx"
+        args.output_onnx = args.output_onnx or artifact_dir / "encoder-window.int8.onnx"
     else:
         args.decoder_dir = args.decoder_dir or artifact_dir / "decoder"
         args.engine = args.engine or artifact_dir / "encoder-window.bf16.engine"
@@ -123,6 +133,24 @@ def main() -> None:
         if args.recipe:
             command.extend(("--recipe", str(args.recipe)))
         subprocess.run(command, check=True)
+        return
+
+    if args.command == "quantize-encoder":
+        from .encoder_quantization import quantize_encoder
+
+        if not args.calibration_audio_dir.is_dir():
+            parser.error(f"calibration audio directory not found: {args.calibration_audio_dir}")
+        if args.max_audio_files < 1:
+            parser.error("max-audio-files must be positive")
+        report = quantize_encoder(
+            args.model,
+            args.input_onnx,
+            args.output_onnx,
+            args.calibration_audio_dir,
+            args.max_audio_files,
+            args.language,
+        )
+        print(json.dumps(report, ensure_ascii=False))
         return
 
     if args.backend == "tensorrt-exllama":

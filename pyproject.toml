@@ -26,6 +26,7 @@ dependencies = [
 
 [project.optional-dependencies]
 packaging = ["pyinstaller>=6.14"]
+quantization = ["onnxruntime-gpu[cuda,cudnn]>=1.23.2,<1.26"]
 
 [project.scripts]
 qwen3-asr = "qwen3_asr_trt.cli:main"
