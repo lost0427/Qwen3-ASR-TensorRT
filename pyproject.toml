@@ -24,6 +24,9 @@ dependencies = [
     "exllamav3 @ https://github.com/turboderp-org/exllamav3/releases/download/v1.6.6/exllamav3-1.6.6%2Bcu128.torch2.10.0-cp310-cp310-linux_x86_64.whl ; sys_platform == 'linux' and python_version == '3.10'",
 ]
 
+[project.optional-dependencies]
+packaging = ["pyinstaller>=6.14"]
+
 [project.scripts]
 qwen3-asr = "qwen3_asr_trt.cli:main"
 

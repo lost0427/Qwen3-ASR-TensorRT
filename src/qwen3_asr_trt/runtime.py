@@ -1,4 +1,5 @@
 from pathlib import Path
+import time
 from typing import Protocol
 
 
@@ -72,15 +73,24 @@ class TensorRTExLlamaTranscriber:
         self.generator = Generator(self.model, self.cache, self.tokenizer, max_batch_size=1)
         self.mm_embedding_type = MMEmbedding
         self.max_new_tokens = max_new_tokens
+        self.last_timings: dict[str, float] = {}
 
     def transcribe(self, audio_path: Path, language: str | None = None) -> str:
         torch = self.torch
+        total_start = time.perf_counter()
         inputs = self.processor.apply_transcription_request(
             audio=str(audio_path), language=language
         )
+        torch.cuda.synchronize()
+        preprocessing_ms = (time.perf_counter() - total_start) * 1000
+
+        encoder_start = time.perf_counter()
         embeddings = self.encoder.encode(
             inputs["input_features"], inputs["input_features_mask"]
         ).to(dtype=torch.float16)
+        torch.cuda.synchronize()
+        encoder_ms = (time.perf_counter() - encoder_start) * 1000
+
         audio_pad = self.processor.tokenizer.convert_tokens_to_ids("<|audio_pad|>")
         audio_positions = inputs["input_ids"][0] == audio_pad
         if int(audio_positions.sum()) != embeddings.shape[0]:
@@ -99,6 +109,7 @@ class TensorRTExLlamaTranscriber:
             inputs["input_ids"][0], skip_special_tokens=False
         )
         prompt = prompt.replace("<|audio_pad|>" * embeddings.shape[0], alias, 1)
+        decoder_start = time.perf_counter()
         output = self.generator.generate(
             prompt,
             max_new_tokens=self.max_new_tokens,
@@ -107,4 +118,14 @@ class TensorRTExLlamaTranscriber:
             completion_only=True,
             embeddings=[audio_embedding],
         )
+        torch.cuda.synchronize()
+        total_ms = (time.perf_counter() - total_start) * 1000
+        decoder_ms = (time.perf_counter() - decoder_start) * 1000
+        self.last_timings = {
+            "preprocessingMs": preprocessing_ms,
+            "encoderMs": encoder_ms,
+            "decoderMs": decoder_ms,
+            "otherMs": max(0.0, total_ms - preprocessing_ms - encoder_ms - decoder_ms),
+            "totalMs": total_ms,
+        }
         return output.strip()

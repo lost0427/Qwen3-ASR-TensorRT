@@ -63,6 +63,27 @@ uv run qwen3-asr serve --backend tensorrt-exllama
 
 The build uses the selected Hugging Face checkpoint. It writes ONNX, TensorRT engine, and extracted decoder files under `artifacts/qwen3-asr-0.6b` by default. Engine files are hardware and TensorRT-version specific and should be built on the target machine.
 
+## Benchmark
+
+Run the same audio repeatedly after model load and warmup:
+
+```powershell
+uv run qwen3-asr benchmark "path/to/sample.wav" --backend tensorrt-exllama --decoder-dir artifacts/qwen3-asr-0.6b/decoder-exl3-4bpw --warmups 2 --repeats 10
+```
+
+On the RTX 4060 desktop, both projects were measured on the same 23.86-second ASRbenchmark sample with 2 warmups and 10 repeats. The current run measured this project at 387.2 ms median (BF16 TensorRT encoder + EXL3 4 bpw decoder) and Qwen3-ASR-GGUF at 810.5 ms (DML + Vulkan, Q4_K decoder).
+
+| Stage | This project | Qwen3-ASR-GGUF | Faster |
+| --- | ---: | ---: | ---: |
+| Encoder | 15.2 ms | 177.2 ms | 11.7x |
+| Decoder prefill | included below | 78.3 ms | |
+| Decoder token generation | included below | 541.5 ms | |
+| Decoder total | 360.7 ms | 619.8 ms | 1.72x |
+| Other / preprocessing | 11.4 ms | 10.9 ms | |
+| End-to-end median | 387.2 ms | 810.5 ms | 2.09x |
+
+The project decoder timing includes ExLlamaV3 prompt processing and generation. GGUF decoder timing is its measured LLM prefill plus token generation. This compares different model configurations: Qwen3-ASR 0.6B with an EXL3 4 bpw decoder versus Qwen3-ASR 1.7B with a Q4_K decoder; it is not a same-size model comparison. Measurements are hardware-specific. INT8 TensorRT export still requires a representative calibration set and explicit ONNX Q/DQ quantization for TensorRT 11.4. Single-file packaging is deferred.
+
 The API accepts WAV, MP3, FLAC, OGG, M4A, and AAC content types, limits uploads to 128 MiB, and binds to loopback by default. Use `--host 0.0.0.0` only when remote clients should connect.
 
 ## Current scope

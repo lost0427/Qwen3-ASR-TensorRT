@@ -1,9 +1,12 @@
 import argparse
 import json
 import logging
+import math
 from pathlib import Path
+import statistics
 import subprocess
 import sys
+import time
 
 from .runtime import Bf16ReferenceTranscriber
 from .runtime import TensorRTExLlamaTranscriber
@@ -24,6 +27,15 @@ def main() -> None:
     transcribe.add_argument("--decoder-dir", type=Path, default=Path("artifacts/qwen3-asr-0.6b/decoder"))
     transcribe.add_argument("--engine", type=Path, default=Path("artifacts/qwen3-asr-0.6b/encoder-window.bf16.engine"))
 
+    benchmark = commands.add_parser("benchmark")
+    benchmark.add_argument("audio", type=Path)
+    benchmark.add_argument("--language", default="English")
+    benchmark.add_argument("--backend", choices=("bf16", "tensorrt-exllama"), default="tensorrt-exllama")
+    benchmark.add_argument("--decoder-dir", type=Path, default=Path("artifacts/qwen3-asr-0.6b/decoder"))
+    benchmark.add_argument("--engine", type=Path, default=Path("artifacts/qwen3-asr-0.6b/encoder-window.bf16.engine"))
+    benchmark.add_argument("--warmups", type=int, default=2)
+    benchmark.add_argument("--repeats", type=int, default=10)
+
     api = commands.add_parser("serve")
     api.add_argument("--host", default="127.0.0.1")
     api.add_argument("--port", type=int, default=8000)
@@ -39,6 +51,7 @@ def main() -> None:
     quantize = commands.add_parser("quantize")
     quantize.add_argument("--input-dir", type=Path, default=Path("artifacts/qwen3-asr-0.6b/decoder"))
     quantize.add_argument("--output-dir", type=Path, default=Path("artifacts/qwen3-asr-0.6b/decoder-exl3-4bpw"))
+    quantize.add_argument("--work-dir", type=Path)
     quantize.add_argument("--bits", type=float, default=4.0)
     quantize.add_argument("--recipe", type=Path)
 
@@ -69,6 +82,8 @@ def main() -> None:
             str(args.input_dir),
             "--out_dir",
             str(args.output_dir),
+            "--work_dir",
+            str(args.work_dir or args.output_dir.with_name(args.output_dir.name + ".work")),
             "--bits",
             str(args.bits),
         ]
@@ -78,6 +93,7 @@ def main() -> None:
         return
 
     if args.backend == "tensorrt-exllama":
+        load_start = time.perf_counter()
         transcriber = TensorRTExLlamaTranscriber(
             args.model,
             args.decoder_dir,
@@ -85,7 +101,59 @@ def main() -> None:
             args.max_new_tokens,
         )
     else:
+        load_start = time.perf_counter()
         transcriber = Bf16ReferenceTranscriber(args.model, args.max_new_tokens)
+    load_ms = (time.perf_counter() - load_start) * 1000
+
+    if args.command == "benchmark":
+        if not args.audio.is_file():
+            parser.error(f"audio file not found: {args.audio}")
+        if args.warmups < 0 or args.repeats < 1:
+            parser.error("warmups must be nonnegative and repeats must be positive")
+        import soundfile
+
+        audio_seconds = soundfile.info(args.audio).duration
+
+        def run_once() -> tuple[float, str]:
+            started = time.perf_counter()
+            result = transcriber.transcribe(args.audio, args.language)
+            return (time.perf_counter() - started) * 1000, result
+
+        for _ in range(args.warmups):
+            run_once()
+        samples = []
+        stage_samples = {}
+        for _ in range(args.repeats):
+            elapsed, result = run_once()
+            samples.append((elapsed, result))
+            for name, value in getattr(transcriber, "last_timings", {}).items():
+                stage_samples.setdefault(name, []).append(value)
+        times = sorted(sample[0] for sample in samples)
+        p90_index = (len(times) - 1) * 0.9
+        p90_low = math.floor(p90_index)
+        p90 = times[p90_low] + (times[math.ceil(p90_index)] - times[p90_low]) * (p90_index - p90_low)
+        report = {
+            "engine": args.backend,
+            "model": args.model,
+            "audioSeconds": audio_seconds,
+            "loadMs": load_ms,
+            "warmups": args.warmups,
+            "repeats": args.repeats,
+            "meanMs": statistics.mean(times),
+            "medianMs": statistics.median(times),
+            "p90Ms": p90,
+            "minMs": times[0],
+            "maxMs": times[-1],
+            "rtf": statistics.median(times) / (audio_seconds * 1000),
+            "text": samples[-1][1],
+        }
+        if stage_samples:
+            report["stages"] = {
+                name: statistics.median(values) for name, values in stage_samples.items()
+            }
+        print(json.dumps(report, ensure_ascii=False))
+        return
+
     if args.command == "transcribe":
         if not args.audio.is_file():
             parser.error(f"audio file not found: {args.audio}")
