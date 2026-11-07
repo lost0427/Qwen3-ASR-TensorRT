@@ -127,9 +127,108 @@ def quantize_encoder(
         "inputOnnx": str(input_onnx),
         "outputOnnx": str(output_onnx),
         "calibrationFiles": len(files),
+        "calibrationAudioFiles": [str(path.relative_to(audio_dir)) for path in files],
         "calibrationWindows": len(samples),
         "quantFormat": "QDQ",
         "quantizedOperators": ["Conv", "MatMul"],
         "qdqNodes": qdq_nodes,
         "calibrationProvider": "CUDAExecutionProvider",
+    }
+
+
+def quantize_encoder_int4(input_onnx: Path, output_onnx: Path, block_size: int = 64) -> dict:
+    """Quantize constant MatMul weights to block-wise INT4 for TensorRT weight-only GEMMs."""
+    import numpy as np
+    import onnx
+    from onnx import TensorProto, helper, numpy_helper
+
+    if not input_onnx.is_file():
+        raise FileNotFoundError(f"FP16 encoder ONNX not found: {input_onnx}")
+    if input_onnx.resolve() == output_onnx.resolve():
+        raise ValueError("Input and output ONNX paths must be different")
+    if block_size != 64:
+        raise ValueError("TensorRT INT4 weight-only quantization uses 64-value blocks")
+
+    model = onnx.load(str(input_onnx), load_external_data=True)
+    initializers = {item.name: item for item in model.graph.initializer}
+    quantized_by_weight = {}
+    dequantize_nodes = {}
+    added_initializers = []
+    quantized_matmuls = 0
+    for node in model.graph.node:
+        if node.op_type != "MatMul" or len(node.input) < 2 or node.input[1] not in initializers:
+            continue
+        weight = initializers[node.input[1]]
+        if weight.name in quantized_by_weight:
+            node.input[1] = quantized_by_weight[weight.name]
+            continue
+        if weight.data_type not in (TensorProto.FLOAT16, TensorProto.FLOAT):
+            continue
+        values = numpy_helper.to_array(weight).astype(np.float32, copy=False)
+        if values.ndim != 2 or values.shape[0] % block_size:
+            continue
+        rows, columns = values.shape
+        blocks = values.reshape(rows // block_size, block_size, columns)
+        scales = np.max(np.abs(blocks), axis=1) / 7.0
+        scales = np.where(scales > 0, scales, 1.0).astype(np.float16)
+        quantized = np.rint(blocks / scales.astype(np.float32)[:, None, :])
+        quantized = np.clip(quantized, -7, 7).astype(np.int8).reshape(rows, columns)
+
+        quantized_name = f"{weight.name}.int4"
+        scale_name = f"{weight.name}.int4_scale"
+        output_name = f"{weight.name}.dequantized"
+        added_initializers.append(helper.make_tensor(
+            quantized_name, TensorProto.INT4, [rows, columns], quantized.reshape(-1).tolist()
+        ))
+        added_initializers.append(numpy_helper.from_array(scales, name=scale_name))
+        dequantize_nodes[output_name] = helper.make_node(
+            "DequantizeLinear",
+            [quantized_name, scale_name],
+            [output_name],
+            name=f"{node.name}.int4_dequantize",
+            axis=0,
+            block_size=block_size,
+        )
+        node.input[1] = output_name
+        quantized_by_weight[weight.name] = output_name
+        quantized_matmuls += 1
+
+    if not quantized_matmuls:
+        raise RuntimeError("No eligible constant MatMul weights were found for INT4 quantization")
+
+    kept = [item for item in model.graph.initializer if item.name not in quantized_by_weight]
+    del model.graph.initializer[:]
+    model.graph.initializer.extend(kept + added_initializers)
+    nodes = list(model.graph.node)
+    del model.graph.node[:]
+    inserted_dequantizers = set()
+    for node in nodes:
+        if node.op_type == "MatMul" and len(node.input) > 1 and node.input[1] in dequantize_nodes:
+            if node.input[1] not in inserted_dequantizers:
+                model.graph.node.append(dequantize_nodes[node.input[1]])
+                inserted_dequantizers.add(node.input[1])
+        model.graph.node.append(node)
+
+    default_opset = next((opset for opset in model.opset_import if not opset.domain), None)
+    if default_opset is None:
+        raise RuntimeError("ONNX model has no default-domain opset")
+    if default_opset.version < 21:
+        default_opset.version = 21
+    output_onnx.parent.mkdir(parents=True, exist_ok=True)
+    onnx.save_model(
+        model,
+        str(output_onnx),
+        save_as_external_data=True,
+        all_tensors_to_one_file=True,
+        location=output_onnx.name + ".data",
+        size_threshold=1024,
+    )
+    onnx.checker.check_model(str(output_onnx))
+    return {
+        "inputOnnx": str(input_onnx),
+        "outputOnnx": str(output_onnx),
+        "quantFormat": "INT4 weight-only QDQ",
+        "blockSize": block_size,
+        "quantizedMatMulWeights": quantized_matmuls,
+        "activationAndConvPrecision": "FP16",
     }

@@ -47,6 +47,7 @@ class TensorRTExLlamaTranscriber:
         engine_path: Path,
         max_new_tokens: int = 256,
         max_context_tokens: int = 8192,
+        sampler=None,
     ) -> None:
         try:
             import torch
@@ -73,6 +74,7 @@ class TensorRTExLlamaTranscriber:
         self.generator = Generator(self.model, self.cache, self.tokenizer, max_batch_size=1)
         self.mm_embedding_type = MMEmbedding
         self.max_new_tokens = max_new_tokens
+        self.sampler = sampler
         self.last_timings: dict[str, float] = {}
 
     def transcribe(self, audio_path: Path, language: str | None = None) -> str:
@@ -113,6 +115,7 @@ class TensorRTExLlamaTranscriber:
         output, generation = self.generator.generate(
             prompt,
             max_new_tokens=self.max_new_tokens,
+            sampler=self.sampler,
             stop_conditions=[151643, 151645],
             encode_special_tokens=True,
             completion_only=True,

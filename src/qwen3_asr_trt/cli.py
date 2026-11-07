@@ -66,7 +66,7 @@ def main() -> None:
     build = commands.add_parser("build")
     build.add_argument("--output-dir", type=Path)
     build.add_argument("--workspace-gib", type=int, default=2)
-    build.add_argument("--encoder-precision", choices=("bf16", "fp16", "int8"), default="bf16")
+    build.add_argument("--encoder-precision", choices=("bf16", "fp16", "int8", "int4"), default="bf16")
 
     quantize = commands.add_parser("quantize")
     quantize.add_argument("--input-dir", type=Path)
@@ -74,6 +74,8 @@ def main() -> None:
     quantize.add_argument("--work-dir", type=Path)
     quantize.add_argument("--bits", type=float, default=4.0)
     quantize.add_argument("--recipe", type=Path)
+    quantize.add_argument("--cal-data", type=Path)
+    quantize.add_argument("--cal-rows", type=int, default=250)
 
     quantize_encoder = commands.add_parser("quantize-encoder")
     quantize_encoder.add_argument("calibration_audio_dir", type=Path)
@@ -81,6 +83,10 @@ def main() -> None:
     quantize_encoder.add_argument("--output-onnx", type=Path)
     quantize_encoder.add_argument("--max-audio-files", type=int, default=32)
     quantize_encoder.add_argument("--language", default="English")
+
+    quantize_encoder_int4 = commands.add_parser("quantize-encoder-int4")
+    quantize_encoder_int4.add_argument("--input-onnx", type=Path)
+    quantize_encoder_int4.add_argument("--output-onnx", type=Path)
 
     args = parser.parse_args()
     artifact_dir = _artifact_dir(args.model)
@@ -92,6 +98,9 @@ def main() -> None:
     elif args.command == "quantize-encoder":
         args.input_onnx = args.input_onnx or artifact_dir / "encoder-window.fp16.onnx"
         args.output_onnx = args.output_onnx or artifact_dir / "encoder-window.int8.onnx"
+    elif args.command == "quantize-encoder-int4":
+        args.input_onnx = args.input_onnx or artifact_dir / "encoder-window.fp16.onnx"
+        args.output_onnx = args.output_onnx or artifact_dir / "encoder-window.int4.onnx"
     else:
         args.decoder_dir = args.decoder_dir or artifact_dir / "decoder"
         args.engine = args.engine or artifact_dir / "encoder-window.bf16.engine"
@@ -107,9 +116,9 @@ def main() -> None:
         precision = args.encoder_precision
         onnx_path = args.output_dir / f"encoder-window.{precision}.onnx"
         engine_path = args.output_dir / f"encoder-window.{precision}.engine"
-        if precision == "int8":
+        if precision in ("int8", "int4"):
             if not onnx_path.is_file():
-                parser.error(f"INT8 encoder ONNX not found: {onnx_path}")
+                parser.error(f"{precision.upper()} encoder ONNX not found: {onnx_path}")
         else:
             export_encoder(args.model, onnx_path, precision)
         build_engine(onnx_path, engine_path, args.workspace_gib)
@@ -132,6 +141,8 @@ def main() -> None:
         ]
         if args.recipe:
             command.extend(("--recipe", str(args.recipe)))
+        if args.cal_data:
+            command.extend(("--cal_data", str(args.cal_data), "--cal_rows", str(args.cal_rows)))
         subprocess.run(command, check=True)
         return
 
@@ -150,6 +161,16 @@ def main() -> None:
             args.max_audio_files,
             args.language,
         )
+        manifest_path = args.output_onnx.with_suffix(args.output_onnx.suffix + ".calibration.json")
+        manifest_path.write_text(json.dumps(report, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+        report["calibrationManifest"] = str(manifest_path)
+        print(json.dumps(report, ensure_ascii=False))
+        return
+
+    if args.command == "quantize-encoder-int4":
+        from .encoder_quantization import quantize_encoder_int4
+
+        report = quantize_encoder_int4(args.input_onnx, args.output_onnx)
         print(json.dumps(report, ensure_ascii=False))
         return
 
