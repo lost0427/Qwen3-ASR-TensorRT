@@ -21,14 +21,15 @@ uv sync
 
 ## Models
 
-The project supports [`Qwen/Qwen3-ASR-0.6B-hf`](https://huggingface.co/Qwen/Qwen3-ASR-0.6B-hf) and [`Qwen/Qwen3-ASR-1.7B-hf`](https://huggingface.co/Qwen/Qwen3-ASR-1.7B-hf), with BF16 and FP16 TensorRT encoder builds, calibrated INT8 Q/DQ encoder builds, and EXL3 3/4 bpw decoder weights.
+The project supports [`Qwen/Qwen3-ASR-0.6B-hf`](https://huggingface.co/Qwen/Qwen3-ASR-0.6B-hf) and [`Qwen/Qwen3-ASR-1.7B-hf`](https://huggingface.co/Qwen/Qwen3-ASR-1.7B-hf), with BF16 and FP16 TensorRT encoder builds, optional local INT8 Q/DQ encoder calibration, and EXL3 3/4 bpw decoder weights.
 
 Published model files:
 
-- [TensorRT encoder: BF16, FP16, and INT8 ONNX](https://huggingface.co/Retrieve0/Qwen3-ASR-1.7B-TensorRT-Encoder)
+- [TensorRT encoder: BF16 and FP16 ONNX](https://huggingface.co/Retrieve0/Qwen3-ASR-1.7B-TensorRT-Encoder)
 - [EXL3 decoder: 3 bpw and 4 bpw](https://huggingface.co/Retrieve0/Qwen3-ASR-1.7B-EXL3-Decoder)
-- [0.6B TensorRT encoder: BF16, FP16, and INT8 ONNX](https://huggingface.co/Retrieve0/Qwen3-ASR-0.6B-TensorRT-Encoder)
+- [0.6B TensorRT encoder: BF16 and FP16 ONNX](https://huggingface.co/Retrieve0/Qwen3-ASR-0.6B-TensorRT-Encoder)
 - [0.6B EXL3 decoder: 3 bpw and 4 bpw](https://huggingface.co/Retrieve0/Qwen3-ASR-0.6B-EXL3-Decoder)
+- [0.6B EXL3 3 bpw, recalibrated with train-clean-100](https://huggingface.co/Retrieve0/Qwen3-ASR-0.6B-EXL3-Decoder/tree/main/decoder-exl3-3bpw-train-clean-100) (separate directory in the same decoder repository)
 
 ## Build the accelerated backend
 
@@ -44,7 +45,7 @@ Build an FP16 encoder for GPUs without BF16 support:
 uv run qwen3-asr --model Qwen/Qwen3-ASR-1.7B-hf build --encoder-precision fp16
 ```
 
-Build a calibrated INT8 encoder:
+Build an experimental local INT8 encoder (not included in the published model files):
 
 ```powershell
 uv sync --extra quantization
@@ -59,14 +60,20 @@ uv run qwen3-asr --model Qwen/Qwen3-ASR-1.7B-hf quantize-encoder-int4
 uv run qwen3-asr --model Qwen/Qwen3-ASR-1.7B-hf build --encoder-precision int4
 ```
 
-Create an EXL3 decoder from the base checkpoint when needed:
+Create the 200-row calibration tensor from a local LibriSpeech `train-clean-100` corpus and Qwen3-ASR checkpoint, then quantize with that explicit training data:
 
 ```powershell
-uv run qwen3-asr --model Qwen/Qwen3-ASR-1.7B-hf quantize --bits 3 --output-dir artifacts/qwen3-asr-1.7b/decoder-exl3-3bpw
-uv run qwen3-asr --model Qwen/Qwen3-ASR-1.7B-hf quantize --bits 4 --output-dir artifacts/qwen3-asr-1.7b/decoder-exl3-4bpw
+uv run python tools\prepare_exl3_calibration.py .\LibriSpeech\train-clean-100 .\models\Qwen3-ASR-1.7B-hf .\artifacts\train-clean-100.safetensors --rows 200 --columns 2048
+uv run qwen3-asr --model Qwen/Qwen3-ASR-1.7B-hf quantize --bits 3 --cal-data .\artifacts\train-clean-100.safetensors --cal-rows 200 --output-dir artifacts/qwen3-asr-1.7b/decoder-exl3-3bpw
+uv run qwen3-asr --model Qwen/Qwen3-ASR-1.7B-hf quantize --bits 4 --cal-data .\artifacts\train-clean-100.safetensors --cal-rows 200 --output-dir artifacts/qwen3-asr-1.7b/decoder-exl3-4bpw
 ```
 
-Use `--model Qwen/Qwen3-ASR-0.6B-hf` and `artifacts/qwen3-asr-0.6b/` for the 0.6B model.
+For the separately published 0.6B 3 bpw variant, generate calibration data with the 0.6B checkpoint and use its distinct output directory:
+
+```powershell
+uv run python tools\prepare_exl3_calibration.py .\LibriSpeech\train-clean-100 .\models\Qwen3-ASR-0.6B-hf .\artifacts\train-clean-100-0.6b.safetensors --rows 200 --columns 2048
+uv run qwen3-asr --model Qwen/Qwen3-ASR-0.6B-hf quantize --bits 3 --cal-data .\artifacts\train-clean-100-0.6b.safetensors --cal-rows 200 --output-dir artifacts/qwen3-asr-0.6b/decoder-exl3-3bpw-train-clean-100
+```
 
 TensorRT engines are generated locally for the target GPU and TensorRT environment.
 

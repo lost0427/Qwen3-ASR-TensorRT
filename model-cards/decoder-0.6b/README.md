@@ -27,10 +27,19 @@ EXL3 quantized text-decoder weights derived from [Qwen/Qwen3-ASR-0.6B-hf](https:
 
 | Variant | Use |
 | --- | --- |
-| `decoder-exl3-3bpw` | Lower memory use |
-| `decoder-exl3-4bpw` | Higher-precision alternative |
+| `decoder-exl3-3bpw` | Legacy 3 bpw export |
+| `decoder-exl3-4bpw` | Legacy 4 bpw export |
+| [`decoder-exl3-3bpw-train-clean-100`](https://huggingface.co/Retrieve0/Qwen3-ASR-0.6B-EXL3-Decoder/tree/main/decoder-exl3-3bpw-train-clean-100) | Separately calibrated 3 bpw export |
 
 Each variant includes EXL3 `model.safetensors`, tokenizer files, model and generation configuration, and quantization configuration.
+
+### Calibration
+
+The existing `decoder-exl3-3bpw` and `decoder-exl3-4bpw` files are legacy exports. Their quantization metadata records 250 rows of 2,048 tokens but does not identify the calibration corpus.
+
+The separately published `decoder-exl3-3bpw-train-clean-100` directory contains the new 3 bpw export. Its calibration tensor contains 200 packed rows of 2,048 tokens, built from 1,603 paired audio requests and transcripts in LibriSpeech `train-clean-100`. No `test-clean` samples were used. Calibration changes quantization statistics; it is not fine-tuning.
+
+On all 2,620 LibriSpeech `test-clean` utterances, the new variant measured 2.5715% WER and 105.39 ms median latency, compared with 2.9029% and 103.69 ms for the legacy 3 bpw file. Each variant was run once; timings are not repeated-run averages.
 
 ### Requirements
 
@@ -64,10 +73,19 @@ These weights are derived from `Qwen/Qwen3-ASR-0.6B-hf` and are published under 
 
 | 版本 | 用途 |
 | --- | --- |
-| `decoder-exl3-3bpw` | 显存占用较低 |
-| `decoder-exl3-4bpw` | 精度较高的替代版本 |
+| `decoder-exl3-3bpw` | 旧版 3 bpw 权重 |
+| `decoder-exl3-4bpw` | 旧版 4 bpw 权重 |
+| [`decoder-exl3-3bpw-train-clean-100`](https://huggingface.co/Retrieve0/Qwen3-ASR-0.6B-EXL3-Decoder/tree/main/decoder-exl3-3bpw-train-clean-100) | 单独校准的新版 3 bpw 权重 |
 
 每个版本包含 EXL3 `model.safetensors`、tokenizer、模型与生成配置以及量化配置。
+
+### 校准数据
+
+现有的 `decoder-exl3-3bpw` 和 `decoder-exl3-4bpw` 是旧版权重。量化配置记录了 250 行、每行 2,048 个 token，但未注明校准语料来源。
+
+独立目录 `decoder-exl3-3bpw-train-clean-100` 中保存新版 3 bpw 权重。校准张量由 LibriSpeech `train-clean-100` 的 1,603 组音频请求和转写文本打包为 200 行，每行 2,048 个 token。校准未使用 `test-clean` 样本。校准会影响量化统计，不会微调模型。
+
+在全部 2,620 条 LibriSpeech `test-clean` 音频上，新版 WER 为 2.5715%，中位延迟为 105.39 ms；旧版 3 bpw 分别为 2.9029% 和 103.69 ms。每个版本只运行了一次，延迟不是多轮平均值。
 
 ### 运行要求
 

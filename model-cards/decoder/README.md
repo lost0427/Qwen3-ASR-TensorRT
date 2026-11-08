@@ -32,6 +32,10 @@ EXL3 quantized text-decoder weights derived from [Qwen/Qwen3-ASR-1.7B-hf](https:
 
 Each variant includes EXL3 `model.safetensors`, tokenizer files, model and generation configuration, and quantization configuration. EXL3 uses quantized weight tensors alongside floating-point scale, normalization, and auxiliary tensors; the variants are identified by their EXL3 bitrate.
 
+### Calibration
+
+The existing 3 bpw and 4 bpw files are legacy exports. Their quantization metadata records 250 rows of 2,048 tokens but does not identify the calibration corpus.
+
 ### Requirements
 
 - NVIDIA GPU and CUDA
@@ -76,6 +80,10 @@ These weights are derived from `Qwen/Qwen3-ASR-1.7B-hf` and are published under 
 | `decoder-exl3-4bpw` | 1.46 GiB | 精度优先的替代版本 |
 
 每个版本包含 EXL3 `model.safetensors`、tokenizer、模型与生成配置、量化配置。EXL3 权重由量化张量以及浮点缩放、归一化和辅助张量组成，版本以 EXL3 bpw 标识。
+
+### 校准数据
+
+现有的 3 bpw 和 4 bpw 权重是旧版导出。量化配置记录了 250 行、每行 2,048 个 token，但未注明校准语料来源。
 
 ### 运行要求
 
