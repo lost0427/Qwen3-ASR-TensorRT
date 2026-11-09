@@ -26,10 +26,15 @@ uv sync
 已发布的模型文件：
 
 - [TensorRT encoder：BF16 和 FP16 ONNX](https://huggingface.co/Retrieve0/Qwen3-ASR-1.7B-TensorRT-Encoder)
-- [EXL3 decoder：3 bpw 和 4 bpw](https://huggingface.co/Retrieve0/Qwen3-ASR-1.7B-EXL3-Decoder)
+- [EXL3 decoder：legacy 3 bpw 和 4 bpw](https://huggingface.co/Retrieve0/Qwen3-ASR-1.7B-EXL3-Decoder)
+- [1.7B EXL3 3 bpw：使用 train-clean-100 重新校准](https://huggingface.co/Retrieve0/Qwen3-ASR-1.7B-EXL3-Decoder/tree/main/decoder-exl3-3bpw-train-clean-100)（同一 decoder 仓库中的独立目录）
+- [1.7B EXL3 4 bpw：使用 train-clean-100 重新校准](https://huggingface.co/Retrieve0/Qwen3-ASR-1.7B-EXL3-Decoder/tree/main/decoder-exl3-4bpw-train-clean-100)（同一 decoder 仓库中的独立目录）
 - [0.6B TensorRT encoder：BF16 和 FP16 ONNX](https://huggingface.co/Retrieve0/Qwen3-ASR-0.6B-TensorRT-Encoder)
-- [0.6B EXL3 decoder：3 bpw 和 4 bpw](https://huggingface.co/Retrieve0/Qwen3-ASR-0.6B-EXL3-Decoder)
+- [0.6B EXL3 decoder：legacy 3 bpw 和 4 bpw](https://huggingface.co/Retrieve0/Qwen3-ASR-0.6B-EXL3-Decoder)
 - [0.6B EXL3 3 bpw：使用 train-clean-100 重新校准](https://huggingface.co/Retrieve0/Qwen3-ASR-0.6B-EXL3-Decoder/tree/main/decoder-exl3-3bpw-train-clean-100)（同一 decoder 仓库中的独立目录）
+- [0.6B EXL3 4 bpw：使用 train-clean-100 重新校准](https://huggingface.co/Retrieve0/Qwen3-ASR-0.6B-EXL3-Decoder/tree/main/decoder-exl3-4bpw-train-clean-100)（同一 decoder 仓库中的独立目录）
+
+legacy 3 bpw 和 4 bpw 使用 ExLlamaV3 默认校准数据量化。`train-clean-100` 版本使用 LibriSpeech `train-clean-100` 校准，针对 LibriSpeech 风格的英语朗读调优；通用音频和中文 ASR 仍默认推荐 legacy 版本。
 
 ## 构建加速后端
 
@@ -60,19 +65,20 @@ uv run qwen3-asr --model Qwen/Qwen3-ASR-1.7B-hf quantize-encoder-int4
 uv run qwen3-asr --model Qwen/Qwen3-ASR-1.7B-hf build --encoder-precision int4
 ```
 
-准备本地 LibriSpeech `train-clean-100` 语料和 Qwen3-ASR 模型后，先生成 200 行校准数据，再显式使用训练数据进行量化：
+准备本地 LibriSpeech `train-clean-100` 语料和 Qwen3-ASR 模型后，先生成 200 行校准数据，再显式使用训练数据进行量化。省略 `--cal-data` 时使用 ExLlamaV3 默认校准数据，legacy 版本就是这样生成的：
 
 ```powershell
 uv run python tools\prepare_exl3_calibration.py .\LibriSpeech\train-clean-100 .\models\Qwen3-ASR-1.7B-hf .\artifacts\train-clean-100.safetensors --rows 200 --columns 2048
-uv run qwen3-asr --model Qwen/Qwen3-ASR-1.7B-hf quantize --bits 3 --cal-data .\artifacts\train-clean-100.safetensors --cal-rows 200 --output-dir artifacts/qwen3-asr-1.7b/decoder-exl3-3bpw
-uv run qwen3-asr --model Qwen/Qwen3-ASR-1.7B-hf quantize --bits 4 --cal-data .\artifacts\train-clean-100.safetensors --cal-rows 200 --output-dir artifacts/qwen3-asr-1.7b/decoder-exl3-4bpw
+uv run qwen3-asr --model Qwen/Qwen3-ASR-1.7B-hf quantize --bits 3 --cal-data .\artifacts\train-clean-100.safetensors --cal-rows 200 --output-dir artifacts/qwen3-asr-1.7b/decoder-exl3-3bpw-train-clean-100
+uv run qwen3-asr --model Qwen/Qwen3-ASR-1.7B-hf quantize --bits 4 --cal-data .\artifacts\train-clean-100.safetensors --cal-rows 200 --output-dir artifacts/qwen3-asr-1.7b/decoder-exl3-4bpw-train-clean-100
 ```
 
-生成单独发布的 0.6B 3 bpw 版本时，使用 0.6B checkpoint 生成校准数据，并将权重输出到独立目录：
+生成单独发布的 0.6B 版本时，使用 0.6B checkpoint 生成校准数据，并将权重输出到独立目录：
 
 ```powershell
 uv run python tools\prepare_exl3_calibration.py .\LibriSpeech\train-clean-100 .\models\Qwen3-ASR-0.6B-hf .\artifacts\train-clean-100-0.6b.safetensors --rows 200 --columns 2048
 uv run qwen3-asr --model Qwen/Qwen3-ASR-0.6B-hf quantize --bits 3 --cal-data .\artifacts\train-clean-100-0.6b.safetensors --cal-rows 200 --output-dir artifacts/qwen3-asr-0.6b/decoder-exl3-3bpw-train-clean-100
+uv run qwen3-asr --model Qwen/Qwen3-ASR-0.6B-hf quantize --bits 4 --cal-data .\artifacts\train-clean-100-0.6b.safetensors --cal-rows 200 --output-dir artifacts/qwen3-asr-0.6b/decoder-exl3-4bpw-train-clean-100
 ```
 
 TensorRT engine 会根据目标 GPU 和本机 TensorRT 环境在本地构建。
