@@ -109,6 +109,14 @@ These weights are derived from `Qwen/Qwen3-ASR-1.7B-hf` and are published under 
 
 `train-clean-100` 版本针对 LibriSpeech 风格的英语朗读调优。通用音频和中文 ASR 仍默认推荐 legacy 版本。
 
+### 与 GGUF Q4_K 对比
+
+![速度与 WER](https://huggingface.co/Retrieve0/Qwen3-ASR-1.7B-EXL3-Decoder/resolve/main/qwen3-1.7b-calibration-vs-gguf.png)
+
+![分阶段延迟](https://huggingface.co/Retrieve0/Qwen3-ASR-1.7B-EXL3-Decoder/resolve/main/qwen3-1.7b-stage-latency.png)
+
+全部配置均使用 2,620 条 test-clean。EXL3 约比 GGUF Q4_K 快 2.0–2.1 倍；图中标注了 WER、中位延迟和速度倍数。
+
 ### 运行要求
 
 - NVIDIA GPU 与 CUDA
