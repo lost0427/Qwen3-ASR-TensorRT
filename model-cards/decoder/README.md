@@ -50,7 +50,7 @@ The `train-clean-100` variants are tuned for LibriSpeech-style English read spee
 
 ![Median latency by stage](https://huggingface.co/Retrieve0/Qwen3-ASR-1.7B-EXL3-Decoder/resolve/main/qwen3-1.7b-stage-latency.png)
 
-All configurations use all 2,620 test-clean utterances. The EXL3 decoders are about 2.0–2.1× faster than GGUF Q4_K; the chart labels give WER, median latency, and the speed ratio.
+All configurations use all 2,620 test-clean utterances. The EXL3 decoders are about 2.0–2.1× faster than GGUF Q4_K. The official `qwen-asr` Transformers backend reaches 1.8863% WER at 863.52 ms, about 4.4× slower than the best EXL3 variant. The chart labels give WER, median latency, and the speed ratio.
 
 ### Requirements
 
@@ -115,7 +115,7 @@ These weights are derived from `Qwen/Qwen3-ASR-1.7B-hf` and are published under 
 
 ![分阶段延迟](https://huggingface.co/Retrieve0/Qwen3-ASR-1.7B-EXL3-Decoder/resolve/main/qwen3-1.7b-stage-latency.png)
 
-全部配置均使用 2,620 条 test-clean。EXL3 约比 GGUF Q4_K 快 2.0–2.1 倍；图中标注了 WER、中位延迟和速度倍数。
+全部配置均使用 2,620 条 test-clean。EXL3 约比 GGUF Q4_K 快 2.0–2.1 倍。官方 `qwen-asr` Transformers 后端的 WER 为 1.8863%，中位延迟为 863.52 ms，比最佳 EXL3 版本慢约 4.4 倍。图中标注了 WER、中位延迟和速度倍数。
 
 ### 运行要求
 

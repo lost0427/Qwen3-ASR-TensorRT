@@ -40,7 +40,7 @@ The existing `decoder-exl3-3bpw` and `decoder-exl3-4bpw` files are legacy export
 
 The separately published `decoder-exl3-3bpw-train-clean-100` and `decoder-exl3-4bpw-train-clean-100` directories contain the calibrated exports. Their calibration tensors contain 200 packed rows of 2,048 tokens, built from 1,603 paired audio requests and transcripts in LibriSpeech `train-clean-100`. No `test-clean` samples were used. Calibration changes quantization statistics; it is not fine-tuning.
 
-On all 2,620 LibriSpeech `test-clean` utterances, the calibrated 3 bpw variant measured 2.5715% WER and 105.39 ms median latency, compared with 2.9029% and 103.69 ms for the legacy 3 bpw file. The calibrated 4 bpw variant measured 2.3776% WER and 144.79 ms median, compared with 2.4228% and 154.94 ms for the legacy 4 bpw file in the same session. Each variant was run once; timings are not repeated-run averages.
+On all 2,620 LibriSpeech `test-clean` utterances, the calibrated 3 bpw variant measured 2.5715% WER and 114.37 ms median latency, compared with 2.9029% and 115.17 ms for the legacy 3 bpw file. The calibrated 4 bpw variant measured 2.3776% WER and 115.05 ms median, compared with 2.4228% and 113.99 ms for the legacy 4 bpw file. These are two-pass 2026-11-10 rerun medians; timings are not repeated-run averages.
 
 The `train-clean-100` variants are tuned for LibriSpeech-style English read speech. For general-purpose audio and Chinese ASR, the legacy decoders remain the default recommendation.
 
@@ -50,7 +50,7 @@ The `train-clean-100` variants are tuned for LibriSpeech-style English read spee
 
 ![Median latency by stage](https://huggingface.co/Retrieve0/Qwen3-ASR-0.6B-EXL3-Decoder/resolve/main/qwen3-0.6b-stage-latency.png)
 
-All configurations use all 2,620 test-clean utterances. The EXL3 decoders are about 1.9–2.9× faster than GGUF Q4_K; the chart labels give WER, median latency, and the speed ratio.
+All configurations use all 2,620 test-clean utterances. The EXL3 decoders are about 2.6× faster than GGUF Q4_K. The official `qwen-asr` Transformers backend reaches 2.3212% WER at 787.12 ms, about 6.8× slower than the best EXL3 variant. The chart labels give WER, median latency, and the speed ratio.
 
 ### Requirements
 
@@ -97,7 +97,7 @@ These weights are derived from `Qwen/Qwen3-ASR-0.6B-hf` and are published under 
 
 独立目录 `decoder-exl3-3bpw-train-clean-100` 和 `decoder-exl3-4bpw-train-clean-100` 中保存新版权重。校准张量由 LibriSpeech `train-clean-100` 的 1,603 组音频请求和转写文本打包为 200 行，每行 2,048 个 token。校准未使用 `test-clean` 样本。校准会影响量化统计，不会微调模型。
 
-在全部 2,620 条 LibriSpeech `test-clean` 音频上，新版 3 bpw 的 WER 为 2.5715%，中位延迟为 105.39 ms；旧版 3 bpw 分别为 2.9029% 和 103.69 ms。新版 4 bpw 的 WER 为 2.3776%，中位延迟为 144.79 ms；同一轮测试中旧版 4 bpw 分别为 2.4228% 和 154.94 ms。每个版本只运行了一次，延迟不是多轮平均值。
+在全部 2,620 条 LibriSpeech `test-clean` 音频上，新版 3 bpw 的 WER 为 2.5715%，中位延迟为 114.37 ms；旧版 3 bpw 分别为 2.9029% 和 115.17 ms。新版 4 bpw 的 WER 为 2.3776%，中位延迟为 115.05 ms；旧版 4 bpw 分别为 2.4228% 和 113.99 ms。以上为 2026-11-10 两轮复测的中位数，延迟不是多轮平均值。
 
 `train-clean-100` 版本针对 LibriSpeech 风格的英语朗读调优。通用音频和中文 ASR 仍默认推荐 legacy 版本。
 
@@ -107,7 +107,7 @@ These weights are derived from `Qwen/Qwen3-ASR-0.6B-hf` and are published under 
 
 ![分阶段延迟](https://huggingface.co/Retrieve0/Qwen3-ASR-0.6B-EXL3-Decoder/resolve/main/qwen3-0.6b-stage-latency.png)
 
-全部配置均使用 2,620 条 test-clean。EXL3 约比 GGUF Q4_K 快 1.9–2.9 倍；图中标注了 WER、中位延迟和速度倍数。
+全部配置均使用 2,620 条 test-clean。EXL3 约比 GGUF Q4_K 快 2.6 倍。官方 `qwen-asr` Transformers 后端的 WER 为 2.3212%，中位延迟为 787.12 ms，比最佳 EXL3 版本慢约 6.8 倍。图中标注了 WER、中位延迟和速度倍数。
 
 ### 运行要求
 

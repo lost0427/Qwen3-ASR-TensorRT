@@ -29,7 +29,7 @@ The EXL3 calibration tensor was generated from paired audio requests and transcr
 
 ### Benchmark
 
-On all 2,620 LibriSpeech `test-clean` utterances, this variant measured 2.3776% corpus WER, 144.79 ms median latency, and 309.65 ms P90 latency. The legacy 4 bpw variant measured 2.4228% WER, 154.94 ms median, and 328.25 ms P90 in the same session. Each variant was run once; latency is not a repeated-run average.
+On all 2,620 LibriSpeech `test-clean` utterances, this variant measured 2.3776% corpus WER, 115.05 ms median latency, and 253.18 ms P90 latency. The legacy 4 bpw variant measured 2.4228% WER, 113.99 ms median, and 249.98 ms P90 in the 2026-11-10 two-pass rerun. Each pass ran once; timings are not repeated-run averages.
 
 The `train-clean-100` variants are tuned for LibriSpeech-style English read speech. For general-purpose audio and Chinese ASR, the legacy decoders remain the default recommendation.
 
@@ -60,7 +60,7 @@ EXL3 校准张量来自 LibriSpeech `train-clean-100` 的音频请求与转写�
 
 ### 评测结果
 
-在全部 2,620 条 LibriSpeech `test-clean` 音频上，本版本的 corpus WER 为 2.3776%，中位延迟为 144.79 ms，P90 为 309.65 ms。同一轮测试中，旧版 4 bpw 的 WER 为 2.4228%，中位延迟为 154.94 ms，P90 为 328.25 ms。两个版本均使用相同的 TensorRT BF16 encoder 和 ExLlamaV3 decoder，各运行一次；延迟不是多轮平均值。
+在全部 2,620 条 LibriSpeech `test-clean` 音频上，本版本的 corpus WER 为 2.3776%，中位延迟为 115.05 ms，P90 为 253.18 ms。2026-11-10 两轮复测中，旧版 4 bpw 的 WER 为 2.4228%，中位延迟为 113.99 ms，P90 为 249.98 ms。每轮各运行一次；延迟不是多轮平均值。
 
 `train-clean-100` 版本针对 LibriSpeech 风格的英语朗读调优。通用音频和中文 ASR 仍默认推荐 legacy 版本。
 
