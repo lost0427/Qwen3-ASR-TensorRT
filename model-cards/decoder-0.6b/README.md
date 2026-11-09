@@ -27,8 +27,8 @@ EXL3 quantized text-decoder weights derived from [Qwen/Qwen3-ASR-0.6B-hf](https:
 
 | Variant | Use |
 | --- | --- |
-| `decoder-exl3-3bpw` | Legacy 3 bpw export |
-| `decoder-exl3-4bpw` | Legacy 4 bpw export |
+| `decoder-exl3-3bpw` | Legacy 3 bpw export, ExLlamaV3 default calibration |
+| `decoder-exl3-4bpw` | Legacy 4 bpw export, ExLlamaV3 default calibration |
 | [`decoder-exl3-3bpw-train-clean-100`](https://huggingface.co/Retrieve0/Qwen3-ASR-0.6B-EXL3-Decoder/tree/main/decoder-exl3-3bpw-train-clean-100) | Separately calibrated 3 bpw export |
 | [`decoder-exl3-4bpw-train-clean-100`](https://huggingface.co/Retrieve0/Qwen3-ASR-0.6B-EXL3-Decoder/tree/main/decoder-exl3-4bpw-train-clean-100) | Separately calibrated 4 bpw export |
 
@@ -36,11 +36,13 @@ Each variant includes EXL3 `model.safetensors`, tokenizer files, model and gener
 
 ### Calibration
 
-The existing `decoder-exl3-3bpw` and `decoder-exl3-4bpw` files are legacy exports. Their quantization metadata records 250 rows of 2,048 tokens but does not identify the calibration corpus.
+The existing `decoder-exl3-3bpw` and `decoder-exl3-4bpw` files are legacy exports. They were quantized with ExLlamaV3's default calibration data: 250 rows of 2,048 tokens.
 
 The separately published `decoder-exl3-3bpw-train-clean-100` and `decoder-exl3-4bpw-train-clean-100` directories contain the calibrated exports. Their calibration tensors contain 200 packed rows of 2,048 tokens, built from 1,603 paired audio requests and transcripts in LibriSpeech `train-clean-100`. No `test-clean` samples were used. Calibration changes quantization statistics; it is not fine-tuning.
 
 On all 2,620 LibriSpeech `test-clean` utterances, the calibrated 3 bpw variant measured 2.5715% WER and 105.39 ms median latency, compared with 2.9029% and 103.69 ms for the legacy 3 bpw file. The calibrated 4 bpw variant measured 2.3776% WER and 144.79 ms median, compared with 2.4228% and 154.94 ms for the legacy 4 bpw file in the same session. Each variant was run once; timings are not repeated-run averages.
+
+The `train-clean-100` variants are tuned for LibriSpeech-style English read speech. For general-purpose audio and Chinese ASR, the legacy decoders remain the default recommendation.
 
 ### Requirements
 
@@ -58,7 +60,7 @@ uv sync
 
 uv run qwen3-asr --model Qwen/Qwen3-ASR-0.6B-hf transcribe .\audio.wav `
   --backend tensorrt-exllama `
-  --decoder-dir .\decoder-exl3-4bpw-train-clean-100 `
+  --decoder-dir .\decoder-exl3-4bpw `
   --language Chinese
 ```
 
@@ -74,8 +76,8 @@ These weights are derived from `Qwen/Qwen3-ASR-0.6B-hf` and are published under 
 
 | 版本 | 用途 |
 | --- | --- |
-| `decoder-exl3-3bpw` | 旧版 3 bpw 权重 |
-| `decoder-exl3-4bpw` | 旧版 4 bpw 权重 |
+| `decoder-exl3-3bpw` | 旧版 3 bpw 权重，ExLlamaV3 默认校准 |
+| `decoder-exl3-4bpw` | 旧版 4 bpw 权重，ExLlamaV3 默认校准 |
 | [`decoder-exl3-3bpw-train-clean-100`](https://huggingface.co/Retrieve0/Qwen3-ASR-0.6B-EXL3-Decoder/tree/main/decoder-exl3-3bpw-train-clean-100) | 单独校准的新版 3 bpw 权重 |
 | [`decoder-exl3-4bpw-train-clean-100`](https://huggingface.co/Retrieve0/Qwen3-ASR-0.6B-EXL3-Decoder/tree/main/decoder-exl3-4bpw-train-clean-100) | 单独校准的新版 4 bpw 权重 |
 
@@ -83,11 +85,13 @@ These weights are derived from `Qwen/Qwen3-ASR-0.6B-hf` and are published under 
 
 ### 校准数据
 
-现有的 `decoder-exl3-3bpw` 和 `decoder-exl3-4bpw` 是旧版权重。量化配置记录了 250 行、每行 2,048 个 token，但未注明校准语料来源。
+现有的 `decoder-exl3-3bpw` 和 `decoder-exl3-4bpw` 是旧版权重，使用 ExLlamaV3 默认校准数据量化：250 行、每行 2,048 个 token。
 
 独立目录 `decoder-exl3-3bpw-train-clean-100` 和 `decoder-exl3-4bpw-train-clean-100` 中保存新版权重。校准张量由 LibriSpeech `train-clean-100` 的 1,603 组音频请求和转写文本打包为 200 行，每行 2,048 个 token。校准未使用 `test-clean` 样本。校准会影响量化统计，不会微调模型。
 
 在全部 2,620 条 LibriSpeech `test-clean` 音频上，新版 3 bpw 的 WER 为 2.5715%，中位延迟为 105.39 ms；旧版 3 bpw 分别为 2.9029% 和 103.69 ms。新版 4 bpw 的 WER 为 2.3776%，中位延迟为 144.79 ms；同一轮测试中旧版 4 bpw 分别为 2.4228% 和 154.94 ms。每个版本只运行了一次，延迟不是多轮平均值。
+
+`train-clean-100` 版本针对 LibriSpeech 风格的英语朗读调优。通用音频和中文 ASR 仍默认推荐 legacy 版本。
 
 ### 运行要求
 
@@ -105,7 +109,7 @@ uv sync
 
 uv run qwen3-asr --model Qwen/Qwen3-ASR-0.6B-hf transcribe .\audio.wav `
   --backend tensorrt-exllama `
-  --decoder-dir .\decoder-exl3-4bpw-train-clean-100 `
+  --decoder-dir .\decoder-exl3-4bpw `
   --language Chinese
 ```
 

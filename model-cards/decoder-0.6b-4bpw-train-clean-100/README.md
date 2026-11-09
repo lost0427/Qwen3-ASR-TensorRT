@@ -21,7 +21,7 @@ tags:
 
 ## English
 
-This is a separately calibrated 4 bpw decoder variant derived from [Qwen/Qwen3-ASR-0.6B-hf](https://huggingface.co/Qwen/Qwen3-ASR-0.6B-hf). It is published in a new directory in the existing [0.6B decoder repository](https://huggingface.co/Retrieve0/Qwen3-ASR-0.6B-EXL3-Decoder). The legacy `decoder-exl3-3bpw` and `decoder-exl3-4bpw` files remain unchanged.
+This is a separately calibrated 4 bpw decoder variant derived from [Qwen/Qwen3-ASR-0.6B-hf](https://huggingface.co/Qwen/Qwen3-ASR-0.6B-hf). It is published in a new directory in the existing [0.6B decoder repository](https://huggingface.co/Retrieve0/Qwen3-ASR-0.6B-EXL3-Decoder). The legacy `decoder-exl3-3bpw` and `decoder-exl3-4bpw` files remain unchanged. The legacy decoders use ExLlamaV3 default calibration data.
 
 ### Calibration
 
@@ -30,6 +30,8 @@ The EXL3 calibration tensor was generated from paired audio requests and transcr
 ### Benchmark
 
 On all 2,620 LibriSpeech `test-clean` utterances, this variant measured 2.3776% corpus WER, 144.79 ms median latency, and 309.65 ms P90 latency. The legacy 4 bpw variant measured 2.4228% WER, 154.94 ms median, and 328.25 ms P90 in the same session. Each variant was run once; latency is not a repeated-run average.
+
+The `train-clean-100` variants are tuned for LibriSpeech-style English read speech. For general-purpose audio and Chinese ASR, the legacy decoders remain the default recommendation.
 
 ### Requirements and usage
 
@@ -50,7 +52,7 @@ These weights are derived from `Qwen/Qwen3-ASR-0.6B-hf` and are published under 
 
 ## 中文
 
-这是基于 [Qwen/Qwen3-ASR-0.6B-hf](https://huggingface.co/Qwen/Qwen3-ASR-0.6B-hf) 重新校准的 4 bpw 文本解码器权重，单独保存在原有的 [0.6B decoder 仓库](https://huggingface.co/Retrieve0/Qwen3-ASR-0.6B-EXL3-Decoder)的新目录中。原来的 `decoder-exl3-3bpw` 和 `decoder-exl3-4bpw` 文件保持不变。
+这是基于 [Qwen/Qwen3-ASR-0.6B-hf](https://huggingface.co/Qwen/Qwen3-ASR-0.6B-hf) 重新校准的 4 bpw 文本解码器权重，单独保存在原有的 [0.6B decoder 仓库](https://huggingface.co/Retrieve0/Qwen3-ASR-0.6B-EXL3-Decoder)的新目录中。原来的 `decoder-exl3-3bpw` 和 `decoder-exl3-4bpw` 文件保持不变。legacy 版本使用 ExLlamaV3 默认校准数据。
 
 ### 校准数据
 
@@ -59,6 +61,8 @@ EXL3 校准张量来自 LibriSpeech `train-clean-100` 的音频请求与转写�
 ### 评测结果
 
 在全部 2,620 条 LibriSpeech `test-clean` 音频上，本版本的 corpus WER 为 2.3776%，中位延迟为 144.79 ms，P90 为 309.65 ms。同一轮测试中，旧版 4 bpw 的 WER 为 2.4228%，中位延迟为 154.94 ms，P90 为 328.25 ms。两个版本均使用相同的 TensorRT BF16 encoder 和 ExLlamaV3 decoder，各运行一次；延迟不是多轮平均值。
+
+`train-clean-100` 版本针对 LibriSpeech 风格的英语朗读调优。通用音频和中文 ASR 仍默认推荐 legacy 版本。
 
 ### 运行要求与使用
 
