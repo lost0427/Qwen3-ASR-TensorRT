@@ -44,6 +44,14 @@ On all 2,620 LibriSpeech `test-clean` utterances, the calibrated 4 bpw variant m
 
 The `train-clean-100` variants are tuned for LibriSpeech-style English read speech. For general-purpose audio and Chinese ASR, the legacy decoders remain the default recommendation.
 
+### Comparison with GGUF Q4_K
+
+![Corpus WER and median latency](https://huggingface.co/Retrieve0/Qwen3-ASR-1.7B-EXL3-Decoder/resolve/main/qwen3-1.7b-calibration-vs-gguf.png)
+
+![Median latency by stage](https://huggingface.co/Retrieve0/Qwen3-ASR-1.7B-EXL3-Decoder/resolve/main/qwen3-1.7b-stage-latency.png)
+
+All configurations use all 2,620 test-clean utterances. The EXL3 decoders are about 2.0–2.1× faster than GGUF Q4_K; the chart labels give WER, median latency, and the speed ratio.
+
 ### Requirements
 
 - NVIDIA GPU and CUDA
