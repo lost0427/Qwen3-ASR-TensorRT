@@ -272,7 +272,7 @@ def _load_token_embedding(model_id, dtype):
 class TensorRTAligner:
     """TensorRT audio encoder + TensorRT text decoder forced aligner."""
 
-    def __init__(self, model_id, engine_path, decoder_engine, decoder_precision: str = "fp16") -> None:
+    def __init__(self, model_id, engine_path, decoder_engine, decoder_precision: str = "bf16") -> None:
         try:
             import torch
             from transformers import AutoProcessor
@@ -346,19 +346,19 @@ def _load_aligner(model_id: str, dtype):
 def export_aligner_encoder(model_id: str, output_path: Path, precision: str = "bf16") -> None:
     import torch
 
-    from .tensorrt_encoder import StaticAudioWindow
+    from .tensorrt_encoder import DynamicAudioWindow
 
     if precision not in ("bf16", "fp16", "fp32"):
         raise ValueError("precision must be 'bf16', 'fp16' or 'fp32'")
     dtype = {"bf16": torch.bfloat16, "fp16": torch.float16, "fp32": torch.float32}[precision]
     aligner = _load_aligner(model_id, dtype)
     thinker = aligner.model.thinker
-    wrapper = StaticAudioWindow(
+    wrapper = DynamicAudioWindow(
         thinker.audio_tower,
         getattr(thinker, "multi_modal_projector", None),
         apply_output_projection=True,
     ).eval().to("cuda:0")
-    frames = wrapper.window_frames
+    frames = wrapper.frames_per_chunk * 8
     features = torch.zeros((1, 128, frames), dtype=torch.float32, device="cuda")
     mask = torch.ones((1, frames), dtype=torch.int32, device="cuda")
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -370,6 +370,10 @@ def export_aligner_encoder(model_id: str, output_path: Path, precision: str = "b
         output_names=["audio_embeddings", "valid_tokens"],
         opset_version=20,
         dynamo=True,
+        dynamic_shapes={
+            "input_features": {2: torch.export.Dim("frames", min=100, max=3600)},
+            "input_features_mask": {1: torch.export.Dim("masked", min=100, max=3600)},
+        },
     )
 
 

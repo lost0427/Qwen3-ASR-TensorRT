@@ -77,7 +77,7 @@ def main() -> None:
     align.add_argument("--backend", choices=("tensorrt", "tensorrt-exllama"), default="tensorrt")
     align.add_argument("--aligner-model", default="Qwen/Qwen3-ForcedAligner-0.6B")
     align.add_argument("--decoder-dir", type=Path)
-    align.add_argument("--decoder-precision", choices=("bf16", "fp16"), default="fp16")
+    align.add_argument("--decoder-precision", choices=("bf16", "fp16"), default="bf16")
     align.add_argument("--decoder-engine", type=Path)
     align.add_argument("--engine", type=Path)
     align.add_argument("--format", choices=("json", "srt", "txt"), default="json")

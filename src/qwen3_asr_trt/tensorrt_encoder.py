@@ -3,7 +3,15 @@ from __future__ import annotations
 from pathlib import Path
 
 
-class StaticAudioWindow:
+class DynamicAudioWindow:
+    """Whole-utterance audio encoder export.
+
+    The reference implementation (Transformers with the ``sdpa`` attention
+    backend) ignores ``cu_seqlens`` and attends over every audio token, so the
+    exported graph does the same: one pass over the whole utterance, with no
+    inference windows.
+    """
+
     def __new__(cls, audio_tower, projector, apply_output_projection: bool = False):
         import torch
         from torch import nn
@@ -16,34 +24,30 @@ class StaticAudioWindow:
                 self.projector = projector if projector is not None else nn.Identity()
                 self.apply_output_projection = apply_output_projection
                 self.frames_per_chunk = audio_tower.config.n_window * 2
-                self.window_frames = audio_tower.config.n_window_infer
-                if self.window_frames % self.frames_per_chunk:
-                    raise ValueError("Inference window must contain whole encoder chunks")
-                self.num_chunks = self.window_frames // self.frames_per_chunk
                 self.num_heads = audio_tower.config.encoder_attention_heads
                 self.head_dim = audio_tower.config.d_model // self.num_heads
                 self.tokens_per_chunk = 13
 
             def forward(self, input_features, input_features_mask):
                 tower = self.audio_tower
-                batch = input_features.to(tower.conv2d1.weight.dtype).reshape(
-                    1, 128, self.num_chunks, self.frames_per_chunk
-                ).permute(0, 2, 1, 3).reshape(self.num_chunks, 1, 128, self.frames_per_chunk)
-                hidden = F.gelu(tower.conv2d1(batch))
+                chunks = input_features.to(tower.conv2d1.weight.dtype).reshape(
+                    1, 128, -1, self.frames_per_chunk
+                ).permute(0, 2, 1, 3).reshape(-1, 1, 128, self.frames_per_chunk)
+                hidden = F.gelu(tower.conv2d1(chunks))
                 hidden = F.gelu(tower.conv2d2(hidden))
                 hidden = F.gelu(tower.conv2d3(hidden))
                 hidden = tower.conv_out(
                     hidden.permute(0, 3, 1, 2)
                     .contiguous()
-                    .reshape(self.num_chunks, self.tokens_per_chunk, -1)
+                    .reshape(chunks.shape[0], self.tokens_per_chunk, -1)
                 )
                 hidden = hidden + tower.positional_embedding.positional_embedding[: self.tokens_per_chunk].to(
                     hidden.dtype
                 )
-                hidden = hidden.reshape(1, self.num_chunks * self.tokens_per_chunk, -1)
+                hidden = hidden.reshape(1, -1, hidden.shape[-1])
 
                 chunk_lengths = input_features_mask.reshape(
-                    1, self.num_chunks, self.frames_per_chunk
+                    1, -1, self.frames_per_chunk
                 ).sum(-1).to(torch.long)
                 for _ in range(3):
                     chunk_lengths = torch.where(
@@ -53,7 +57,7 @@ class StaticAudioWindow:
                     )
                 valid_lengths = chunk_lengths.sum(-1)
                 key_mask = torch.arange(
-                    self.num_chunks * self.tokens_per_chunk,
+                    hidden.shape[1],
                     device=hidden.device,
                 ) >= valid_lengths.unsqueeze(-1)
 
@@ -90,6 +94,7 @@ class StaticAudioWindow:
                 return hidden, valid_lengths
 
         return Module()
+
 
 
 def _post_cnn_tokens(frame_count: int, frames_per_chunk: int = 100) -> int:
@@ -133,8 +138,8 @@ def export_encoder(model_id: str, output_path: Path, precision: str = "bf16") ->
     thinker = getattr(model, "thinker", getattr(model, "model", model))
     tower = thinker.audio_tower
     projector = getattr(thinker, "multi_modal_projector", None)
-    wrapper = StaticAudioWindow(tower, projector).eval().to("cuda:0")
-    frames = wrapper.window_frames
+    wrapper = DynamicAudioWindow(tower, projector).eval().to("cuda:0")
+    frames = wrapper.frames_per_chunk * 8
     sample_features = torch.zeros((1, 128, frames), dtype=torch.float32, device="cuda")
     sample_mask = torch.ones((1, frames), dtype=torch.int32, device="cuda")
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -146,12 +151,21 @@ def export_encoder(model_id: str, output_path: Path, precision: str = "bf16") ->
         output_names=["audio_embeddings", "valid_tokens"],
         opset_version=20,
         dynamo=True,
+        dynamic_shapes={
+            "input_features": {2: torch.export.Dim("frames", min=100, max=3600)},
+            "input_features_mask": {1: torch.export.Dim("masked", min=100, max=3600)},
+        },
     )
     del model
     torch.cuda.empty_cache()
 
 
-def build_engine(onnx_path: Path, engine_path: Path, workspace_gib: int = 2) -> None:
+def build_engine(
+    onnx_path: Path,
+    engine_path: Path,
+    workspace_gib: int = 2,
+    frames_range: tuple[int, int, int] | None = (100, 800, 3600),
+) -> None:
     import tensorrt as trt
 
     logger = trt.Logger(trt.Logger.WARNING)
@@ -164,6 +178,14 @@ def build_engine(onnx_path: Path, engine_path: Path, workspace_gib: int = 2) -> 
 
     config = builder.create_builder_config()
     config.set_memory_pool_limit(trt.MemoryPoolType.WORKSPACE, workspace_gib << 30)
+    names = {network.get_input(i).name for i in range(network.num_inputs)}
+    if frames_range is not None and "input_features" in names:
+        low, optimum, high = frames_range
+        profile = builder.create_optimization_profile()
+        profile.set_shape("input_features", (1, 128, low), (1, 128, optimum), (1, 128, high))
+        if "input_features_mask" in names:
+            profile.set_shape("input_features_mask", (1, low), (1, optimum), (1, high))
+        config.add_optimization_profile(profile)
     serialized = builder.build_serialized_network(network, config)
     if serialized is None:
         raise RuntimeError("TensorRT failed to build the encoder engine")
@@ -193,7 +215,10 @@ class TensorRTAudioEncoder:
             for i in range(self.engine.num_io_tensors)
             if self.engine.get_tensor_mode(self.engine.get_tensor_name(i)) == trt.TensorIOMode.OUTPUT
         ]
-        self.window_frames = self.engine.get_tensor_shape(self.input_names[0])[-1]
+        self.frames_per_chunk = 100
+        window = self.engine.get_tensor_shape(self.input_names[0])[-1]
+        if window > 0:
+            self.frames_per_chunk = window
         self.embedding_shape = tuple(self.engine.get_tensor_shape(self.output_names[0]))
         self.embedding_dtype = {
             trt.DataType.BF16: torch.bfloat16,
@@ -201,40 +226,45 @@ class TensorRTAudioEncoder:
             trt.DataType.FLOAT: torch.float32,
         }[self.engine.get_tensor_dtype(self.output_names[0])]
         self.valid_dtype = torch.int64
+        self.buffers: dict[tuple, "torch.Tensor"] = {}
+
+    def _buffer(self, key, shape, dtype):
+        buffer = self.buffers.get(key)
+        if buffer is None or tuple(buffer.shape) != tuple(shape):
+            buffer = self.torch.zeros(shape, device="cuda", dtype=dtype)
+            self.buffers[key] = buffer
+        return buffer
 
     def encode(self, input_features, input_features_mask):
         torch = self.torch
-        frames_per_window = self.window_frames
         frame_count = int(input_features_mask.sum().item())
-        pieces = []
-        for start in range(0, max(frame_count, 1), frames_per_window):
-            valid = min(frame_count - start, frames_per_window)
-            features = torch.zeros(
-                (1, 128, frames_per_window), device="cuda", dtype=torch.float32
-            )
-            mask = torch.zeros((1, frames_per_window), device="cuda", dtype=torch.int32)
-            available = min(valid, input_features.shape[-1] - start)
-            if available > 0:
-                features[..., :available] = input_features[..., start : start + available].to(
-                    device="cuda", dtype=torch.float32
-                )
-                mask[..., :available] = input_features_mask[..., start : start + available].to(
-                    device="cuda", dtype=torch.int32
-                )
-            embeddings = torch.empty(
-                self.embedding_shape, device="cuda", dtype=self.embedding_dtype
-            )
-            valid_tokens = torch.empty((1,), device="cuda", dtype=self.valid_dtype)
-            for name, tensor in zip(self.input_names, (features, mask)):
-                self.context.set_tensor_address(name, tensor.data_ptr())
-            for name, tensor in zip(self.output_names, (embeddings, valid_tokens)):
-                self.context.set_tensor_address(name, tensor.data_ptr())
-            stream = torch.cuda.current_stream()
-            if not self.context.execute_async_v3(stream.cuda_stream):
-                raise RuntimeError("TensorRT encoder execution failed")
-            stream.synchronize()
-            token_count = _post_cnn_tokens(valid)
-            pieces.append(embeddings[0, :token_count])
-        if not pieces:
+        chunk = self.frames_per_chunk
+        padded = max(chunk, ((max(frame_count, 1) + chunk - 1) // chunk) * chunk)
+        available = min(frame_count, int(input_features.shape[-1]))
+
+        features = self._buffer(("features", padded), (1, 128, padded), torch.float32)
+        features.zero_()
+        mask = self._buffer(("mask", padded), (1, padded), torch.int32)
+        mask.zero_()
+        if available > 0:
+            features[..., :available] = input_features[..., :available].to("cuda", torch.float32)
+            mask[..., :available] = input_features_mask[..., :available].to("cuda", torch.int32)
+
+        embeddings = self._buffer(("out", padded), (1, padded // 2, self.embedding_shape[-1]), self.embedding_dtype)
+        valid_tokens = self._buffer(("valid", 1), (1,), self.valid_dtype)
+
+        self.context.set_input_shape("input_features", (1, 128, padded))
+        self.context.set_input_shape("input_features_mask", (1, padded))
+        for name, tensor in zip(self.input_names, (features, mask)):
+            self.context.set_tensor_address(name, tensor.data_ptr())
+        for name, tensor in zip(self.output_names, (embeddings, valid_tokens)):
+            self.context.set_tensor_address(name, tensor.data_ptr())
+        stream = torch.cuda.current_stream()
+        if not self.context.execute_async_v3(stream.cuda_stream):
+            raise RuntimeError("TensorRT encoder execution failed")
+        stream.synchronize()
+
+        token_count = _post_cnn_tokens(frame_count)
+        if token_count <= 0:
             return torch.empty((0, self.embedding_shape[-1]), device="cuda", dtype=self.embedding_dtype)
-        return torch.cat(pieces, dim=0)
+        return embeddings[0, :token_count]
