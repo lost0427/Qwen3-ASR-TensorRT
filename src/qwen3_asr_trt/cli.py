@@ -33,6 +33,28 @@ def _wer(reference: str, hypothesis: str) -> float:
     return previous[-1] / max(1, len(expected))
 
 
+def _srt_time(seconds: float) -> str:
+    total_ms = max(0, round(seconds * 1000))
+    hours, remainder = divmod(total_ms, 3600000)
+    minutes, remainder = divmod(remainder, 60000)
+    secs, millis = divmod(remainder, 1000)
+    return f"{hours:02d}:{minutes:02d}:{secs:02d},{millis:03d}"
+
+
+def _format_srt(items: list[dict]) -> str:
+    return "\n".join(
+        f"{index}\n{_srt_time(item['start_time'])} --> {_srt_time(item['end_time'])}\n{item['text']}\n"
+        for index, item in enumerate(items, 1)
+    ).rstrip()
+
+
+def _format_txt(items: list[dict]) -> str:
+    return "\n".join(
+        f"{item['start_time']:.3f}\t{item['end_time']:.3f}\t{item['text']}"
+        for item in items
+    )
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(prog="qwen3-asr")
     parser.add_argument("--model", default="Qwen/Qwen3-ASR-0.6B-hf")
@@ -46,6 +68,18 @@ def main() -> None:
     transcribe.add_argument("--backend", choices=("bf16", "tensorrt-exllama"), default="bf16")
     transcribe.add_argument("--decoder-dir", type=Path)
     transcribe.add_argument("--engine", type=Path)
+
+    align = commands.add_parser("align")
+    align.add_argument("audio", type=Path)
+    align.add_argument("--text")
+    align.add_argument("--text-file", type=Path)
+    align.add_argument("--language", required=True)
+    align.add_argument("--backend", choices=("tensorrt-exllama",), default="tensorrt-exllama")
+    align.add_argument("--aligner-model", default="Qwen/Qwen3-ForcedAligner-0.6B")
+    align.add_argument("--decoder-dir", type=Path)
+    align.add_argument("--engine", type=Path)
+    align.add_argument("--format", choices=("json", "srt", "txt"), default="json")
+    align.add_argument("--output", type=Path)
 
     benchmark = commands.add_parser("benchmark")
     benchmark.add_argument("audio", type=Path)
@@ -68,6 +102,11 @@ def main() -> None:
     build.add_argument("--workspace-gib", type=int, default=2)
     build.add_argument("--encoder-precision", choices=("bf16", "fp16", "int8", "int4"), default="bf16")
 
+    build_aligner = commands.add_parser("build-aligner")
+    build_aligner.add_argument("--aligner-model", default="Qwen/Qwen3-ForcedAligner-0.6B")
+    build_aligner.add_argument("--output-dir", type=Path)
+    build_aligner.add_argument("--workspace-gib", type=int, default=2)
+
     quantize = commands.add_parser("quantize")
     quantize.add_argument("--input-dir", type=Path)
     quantize.add_argument("--output-dir", type=Path)
@@ -76,6 +115,7 @@ def main() -> None:
     quantize.add_argument("--recipe", type=Path)
     quantize.add_argument("--cal-data", type=Path)
     quantize.add_argument("--cal-rows", type=int, default=250)
+    quantize.add_argument("--head-bits", type=int, default=6)
 
     quantize_encoder = commands.add_parser("quantize-encoder")
     quantize_encoder.add_argument("calibration_audio_dir", type=Path)
@@ -92,6 +132,8 @@ def main() -> None:
     artifact_dir = _artifact_dir(args.model)
     if args.command == "build":
         args.output_dir = args.output_dir or artifact_dir
+    elif args.command == "build-aligner":
+        args.output_dir = args.output_dir or _artifact_dir(args.aligner_model)
     elif args.command == "quantize":
         args.input_dir = args.input_dir or artifact_dir / "decoder"
         args.output_dir = args.output_dir or artifact_dir / "decoder-exl3-4bpw"
@@ -101,6 +143,10 @@ def main() -> None:
     elif args.command == "quantize-encoder-int4":
         args.input_onnx = args.input_onnx or artifact_dir / "encoder-window.fp16.onnx"
         args.output_onnx = args.output_onnx or artifact_dir / "encoder-window.int4.onnx"
+    elif args.command == "align":
+        aligner_dir = _artifact_dir(args.aligner_model)
+        args.decoder_dir = args.decoder_dir or aligner_dir / "decoder-exl3-4bpw"
+        args.engine = args.engine or aligner_dir / "aligner-encoder-window.bf16.engine"
     else:
         args.decoder_dir = args.decoder_dir or artifact_dir / "decoder"
         args.engine = args.engine or artifact_dir / "encoder-window.bf16.engine"
@@ -125,6 +171,45 @@ def main() -> None:
         export_text_model(args.model, args.output_dir / "decoder")
         return
 
+    if args.command == "build-aligner":
+        from .aligner import export_aligner_decoder, export_aligner_encoder
+        from .tensorrt_encoder import build_engine
+
+        onnx_path = args.output_dir / "aligner-encoder-window.bf16.onnx"
+        engine_path = args.output_dir / "aligner-encoder-window.bf16.engine"
+        export_aligner_encoder(args.aligner_model, onnx_path)
+        build_engine(onnx_path, engine_path, args.workspace_gib)
+        export_aligner_decoder(args.aligner_model, args.output_dir / "decoder")
+        return
+
+    if args.command == "align":
+        from .aligner import TensorRTExLlamaAligner
+
+        if args.text is None and args.text_file is None:
+            parser.error("align requires --text or --text-file")
+        if args.text is not None and args.text_file is not None:
+            parser.error("use either --text or --text-file")
+        text = args.text if args.text is not None else args.text_file.read_text(encoding="utf-8")
+        aligner = TensorRTExLlamaAligner(
+            args.aligner_model, args.decoder_dir, args.engine
+        )
+        items = aligner.align(args.audio, text.strip(), args.language)
+        if args.format == "json":
+            payload = json.dumps(
+                {"items": items, "timings": aligner.last_timings},
+                indent=2,
+                ensure_ascii=False,
+            )
+        elif args.format == "srt":
+            payload = _format_srt(items)
+        else:
+            payload = _format_txt(items)
+        if args.output:
+            args.output.write_text(payload + "\n", encoding="utf-8")
+        else:
+            print(payload)
+        return
+
     if args.command == "quantize":
         command = [
             sys.executable,
@@ -138,6 +223,8 @@ def main() -> None:
             str(args.work_dir or args.output_dir.with_name(args.output_dir.name + ".work")),
             "--bits",
             str(args.bits),
+            "--head_bits",
+            str(args.head_bits),
         ]
         if args.recipe:
             command.extend(("--recipe", str(args.recipe)))

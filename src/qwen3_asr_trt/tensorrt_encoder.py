@@ -4,7 +4,7 @@ from pathlib import Path
 
 
 class StaticAudioWindow:
-    def __new__(cls, audio_tower, projector):
+    def __new__(cls, audio_tower, projector, apply_output_projection: bool = False):
         import torch
         from torch import nn
         from torch.nn import functional as F
@@ -14,6 +14,7 @@ class StaticAudioWindow:
                 super().__init__()
                 self.audio_tower = audio_tower
                 self.projector = projector if projector is not None else nn.Identity()
+                self.apply_output_projection = apply_output_projection
                 self.frames_per_chunk = audio_tower.config.n_window * 2
                 self.window_frames = audio_tower.config.n_window_infer
                 if self.window_frames % self.frames_per_chunk:
@@ -83,6 +84,8 @@ class StaticAudioWindow:
                     hidden = residual + hidden
 
                 hidden = tower.ln_post(hidden)
+                if self.apply_output_projection:
+                    hidden = tower.proj2(tower.act(tower.proj1(hidden)))
                 hidden = self.projector(hidden)
                 return hidden, valid_lengths
 
