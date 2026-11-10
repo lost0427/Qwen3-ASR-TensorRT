@@ -74,9 +74,11 @@ def main() -> None:
     align.add_argument("--text")
     align.add_argument("--text-file", type=Path)
     align.add_argument("--language", required=True)
-    align.add_argument("--backend", choices=("tensorrt-exllama",), default="tensorrt-exllama")
+    align.add_argument("--backend", choices=("tensorrt", "tensorrt-exllama"), default="tensorrt")
     align.add_argument("--aligner-model", default="Qwen/Qwen3-ForcedAligner-0.6B")
     align.add_argument("--decoder-dir", type=Path)
+    align.add_argument("--decoder-precision", choices=("bf16", "fp16"), default="fp16")
+    align.add_argument("--decoder-engine", type=Path)
     align.add_argument("--engine", type=Path)
     align.add_argument("--format", choices=("json", "srt", "txt"), default="json")
     align.add_argument("--output", type=Path)
@@ -106,6 +108,7 @@ def main() -> None:
     build_aligner.add_argument("--aligner-model", default="Qwen/Qwen3-ForcedAligner-0.6B")
     build_aligner.add_argument("--output-dir", type=Path)
     build_aligner.add_argument("--workspace-gib", type=int, default=2)
+    build_aligner.add_argument("--decoder-precision", choices=("bf16", "fp16", "both"), default="both")
 
     quantize = commands.add_parser("quantize")
     quantize.add_argument("--input-dir", type=Path)
@@ -147,6 +150,10 @@ def main() -> None:
         aligner_dir = _artifact_dir(args.aligner_model)
         args.decoder_dir = args.decoder_dir or aligner_dir / "decoder-exl3-4bpw"
         args.engine = args.engine or aligner_dir / "aligner-encoder-window.bf16.engine"
+        args.decoder_engine = (
+            args.decoder_engine
+            or aligner_dir / f"aligner-decoder-window.{args.decoder_precision}.engine"
+        )
     else:
         args.decoder_dir = args.decoder_dir or artifact_dir / "decoder"
         args.engine = args.engine or artifact_dir / "encoder-window.bf16.engine"
@@ -172,27 +179,55 @@ def main() -> None:
         return
 
     if args.command == "build-aligner":
-        from .aligner import export_aligner_decoder, export_aligner_encoder
+        from .aligner import (
+            build_aligner_decoder_engine,
+            export_aligner_decoder,
+            export_aligner_decoder_tensorrt,
+            export_aligner_encoder,
+        )
         from .tensorrt_encoder import build_engine
 
         onnx_path = args.output_dir / "aligner-encoder-window.bf16.onnx"
         engine_path = args.output_dir / "aligner-encoder-window.bf16.engine"
-        export_aligner_encoder(args.aligner_model, onnx_path)
-        build_engine(onnx_path, engine_path, args.workspace_gib)
+        if not engine_path.is_file():
+            export_aligner_encoder(args.aligner_model, onnx_path)
+            build_engine(onnx_path, engine_path, args.workspace_gib)
         export_aligner_decoder(args.aligner_model, args.output_dir / "decoder")
+
+        precisions = (
+            ["bf16", "fp16"] if args.decoder_precision == "both" else [args.decoder_precision]
+        )
+        for precision in precisions:
+            decoder_onnx = args.output_dir / f"aligner-decoder-window.{precision}.onnx"
+            decoder_engine = args.output_dir / f"aligner-decoder-window.{precision}.engine"
+            export_aligner_decoder_tensorrt(args.aligner_model, decoder_onnx, precision)
+            build_aligner_decoder_engine(
+                decoder_onnx, decoder_engine, args.workspace_gib
+            )
+            decoder_onnx.unlink(missing_ok=True)
+            data_file = decoder_onnx.with_suffix(decoder_onnx.suffix + ".data")
+            data_file.unlink(missing_ok=True)
         return
 
     if args.command == "align":
-        from .aligner import TensorRTExLlamaAligner
+        from .aligner import TensorRTAligner, TensorRTExLlamaAligner
 
         if args.text is None and args.text_file is None:
             parser.error("align requires --text or --text-file")
         if args.text is not None and args.text_file is not None:
             parser.error("use either --text or --text-file")
         text = args.text if args.text is not None else args.text_file.read_text(encoding="utf-8")
-        aligner = TensorRTExLlamaAligner(
-            args.aligner_model, args.decoder_dir, args.engine
-        )
+        if args.backend == "tensorrt":
+            aligner = TensorRTAligner(
+                args.aligner_model,
+                args.engine,
+                args.decoder_engine,
+                args.decoder_precision,
+            )
+        else:
+            aligner = TensorRTExLlamaAligner(
+                args.aligner_model, args.decoder_dir, args.engine
+            )
         items = aligner.align(args.audio, text.strip(), args.language)
         if args.format == "json":
             payload = json.dumps(

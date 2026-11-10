@@ -198,6 +198,7 @@ class TensorRTAudioEncoder:
         self.embedding_dtype = {
             trt.DataType.BF16: torch.bfloat16,
             trt.DataType.HALF: torch.float16,
+            trt.DataType.FLOAT: torch.float32,
         }[self.engine.get_tensor_dtype(self.output_names[0])]
         self.valid_dtype = torch.int64
 

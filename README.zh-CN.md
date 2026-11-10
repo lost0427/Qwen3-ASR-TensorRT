@@ -85,10 +85,13 @@ uv run qwen3-asr --model Qwen/Qwen3-ASR-0.6B-hf quantize --bits 4 --cal-data .\a
 
 TensorRT engine 会根据目标 GPU 和本机 TensorRT 环境在本地构建。
 
-构建强制对齐器 encoder 并导出 decoder：
+构建强制对齐器 encoder，并导出两种 decoder：
 
 ```powershell
+# TensorRT encoder + TensorRT bf16/fp16 decoder
 uv run qwen3-asr build-aligner
+
+# 可选：EXL3 4 bpw decoder
 uv run qwen3-asr --model Qwen/Qwen3-ForcedAligner-0.6B quantize --bits 4 --head-bits 16
 ```
 
@@ -104,7 +107,7 @@ uv run qwen3-asr --model Qwen/Qwen3-ASR-1.7B-hf transcribe .\audio.wav --backend
 uv run qwen3-asr align .\audio.wav --text-file .\transcript.txt --language English --format srt --output .\audio.srt
 ```
 
-`align` 默认使用 TensorRT encoder 和 EXL3 aligner decoder，支持 `--format json`、`--format srt`、`--format txt`；也可以用 `--text` 直接传入文本。通过 `--decoder-dir` 和 `--engine` 指定具体构建产物。
+`align` 默认使用 TensorRT encoder 和 TensorRT fp16 aligner decoder，支持 `--format json`、`--format srt`、`--format txt`；也可以用 `--text` 直接传入文本。`--decoder-precision bf16` 切换 bf16 engine，`--backend tensorrt-exllama` 切换到 EXL3 decoder，`--engine` / `--decoder-engine` 用于指定具体构建产物。
 
 
 启动 HTTP API：

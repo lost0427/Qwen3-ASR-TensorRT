@@ -85,10 +85,13 @@ uv run qwen3-asr --model Qwen/Qwen3-ASR-0.6B-hf quantize --bits 4 --cal-data .\a
 
 TensorRT engines are generated locally for the target GPU and TensorRT environment.
 
-Build the forced aligner encoder and export its text decoder:
+Build the forced aligner encoder and export both decoder variants:
 
 ```powershell
+# TensorRT encoder + TensorRT bf16/fp16 decoders
 uv run qwen3-asr build-aligner
+
+# optional EXL3 4 bpw decoder
 uv run qwen3-asr --model Qwen/Qwen3-ForcedAligner-0.6B quantize --bits 4 --head-bits 16
 ```
 
@@ -104,9 +107,12 @@ uv run qwen3-asr --model Qwen/Qwen3-ASR-1.7B-hf transcribe .\audio.wav --backend
 uv run qwen3-asr align .\audio.wav --text-file .\transcript.txt --language English --format srt --output .\audio.srt
 ```
 
-`align` uses the TensorRT encoder and EXL3 aligner decoder by default. It supports
-`--format json`, `--format srt`, and `--format txt`; `--text` can be used instead
-of `--text-file`. Use `--decoder-dir` and `--engine` to point at a specific build.
+`align` uses the TensorRT encoder and a TensorRT fp16 aligner decoder by default.
+It supports `--format json`, `--format srt`, and `--format txt`; `--text` can be
+used instead of `--text-file`. `--decoder-precision bf16` selects the bf16 engine,
+`--backend tensorrt-exllama` selects the EXL3 decoder, and `--engine` /
+`--decoder-engine` point at specific builds.
+
 
 
 Start the HTTP API:
