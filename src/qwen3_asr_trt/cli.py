@@ -78,6 +78,7 @@ def main() -> None:
     align.add_argument("--aligner-model", default="Qwen/Qwen3-ForcedAligner-0.6B")
     align.add_argument("--decoder-dir", type=Path)
     align.add_argument("--decoder-precision", choices=("bf16", "fp16"), default="bf16")
+    align.add_argument("--encoder-precision", choices=("bf16", "fp16"), default=None)
     align.add_argument("--decoder-engine", type=Path)
     align.add_argument("--engine", type=Path)
     align.add_argument("--format", choices=("json", "srt", "txt"), default="json")
@@ -149,7 +150,11 @@ def main() -> None:
     elif args.command == "align":
         aligner_dir = _artifact_dir(args.aligner_model)
         args.decoder_dir = args.decoder_dir or aligner_dir / "decoder-exl3-4bpw"
-        args.engine = args.engine or aligner_dir / "aligner-encoder-window.bf16.engine"
+        args.encoder_precision = args.encoder_precision or args.decoder_precision
+        args.engine = (
+            args.engine
+            or aligner_dir / f"aligner-encoder-window.{args.encoder_precision}.engine"
+        )
         args.decoder_engine = (
             args.decoder_engine
             or aligner_dir / f"aligner-decoder-window.{args.decoder_precision}.engine"

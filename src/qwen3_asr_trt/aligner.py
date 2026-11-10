@@ -297,6 +297,14 @@ class TensorRTAligner:
         self.last_timings: dict[str, float] = {}
         self.decoder = TensorRTAlignDecoder(Path(decoder_engine))
         self.decoder_precision = decoder_precision
+        if self.encoder.embedding_dtype != self.decoder.dtype:
+            import logging
+
+            logging.getLogger(__name__).warning(
+                "Mixed precision: encoder %s with %s decoder",
+                self.encoder.embedding_dtype,
+                self.decoder.dtype,
+            )
         self.token_embedding = _load_token_embedding(model_id, self.decoder.dtype)
 
     def align(self, audio_path: Path, text: str, language: str) -> list[dict]:

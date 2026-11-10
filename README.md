@@ -109,7 +109,7 @@ uv run qwen3-asr align .\audio.wav --text-file .\transcript.txt --language Engli
 
 `align` uses the TensorRT encoder and a TensorRT bf16 aligner decoder by default.
 It supports `--format json`, `--format srt`, and `--format txt`; `--text` can be
-used instead of `--text-file`. `--decoder-precision fp16` selects the fp16 engine, which is about 5% faster,
+used instead of `--text-file`. `--decoder-precision fp16` selects the fp16 engine, which is about 8% faster,
 `--backend tensorrt-exllama` selects the EXL3 decoder, and `--engine` /
 `--decoder-engine` point at specific builds.
 

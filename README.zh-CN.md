@@ -107,7 +107,7 @@ uv run qwen3-asr --model Qwen/Qwen3-ASR-1.7B-hf transcribe .\audio.wav --backend
 uv run qwen3-asr align .\audio.wav --text-file .\transcript.txt --language English --format srt --output .\audio.srt
 ```
 
-`align` 默认使用 TensorRT encoder 和 TensorRT bf16 aligner decoder，支持 `--format json`、`--format srt`、`--format txt`；也可以用 `--text` 直接传入文本。`--decoder-precision fp16` 切换 fp16 engine（约快 5%），`--backend tensorrt-exllama` 切换到 EXL3 decoder，`--engine` / `--decoder-engine` 用于指定具体构建产物。
+`align` 默认使用 TensorRT encoder 和 TensorRT bf16 aligner decoder，支持 `--format json`、`--format srt`、`--format txt`；也可以用 `--text` 直接传入文本。`--decoder-precision fp16` 切换 fp16 engine（约快 8%，encoder 自动跟随），`--backend tensorrt-exllama` 切换到 EXL3 decoder，`--engine` / `--decoder-engine` 用于指定具体构建产物。
 
 
 启动 HTTP API：
