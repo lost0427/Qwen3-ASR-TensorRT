@@ -28,7 +28,7 @@ The aligner's classification head has 5,000 real rows. The exported decoder pads
 
 ### Benchmark
 
-On all 2,620 LibriSpeech `test-clean` utterances and 52,576 aligned items, the TensorRT BF16 encoder + EXL3 4 bpw decoder measured 39.52 ms median latency and 63.87 ms P90, versus 93.13 ms and 114.06 ms for the official Transformers BF16 backend and 146.73 ms and 186.88 ms for the GGUF INT4 + Q4_K backend. The token sequence matched on every utterance; 98.0% of TensorRT boundaries and 96.2% of GGUF boundaries are exactly equal to the official output, and the mean absolute boundary difference is 4.71 ms and 8.73 ms respectively.
+On all 2,620 LibriSpeech `test-clean` utterances and 52,576 aligned items, the TensorRT BF16 encoder + EXL3 4 bpw decoder measured 39.52 ms median latency and 63.87 ms P90, versus 93.13 ms and 114.06 ms for the official Transformers BF16 backend and 139.55 ms and 182.02 ms for the GGUF INT4 + Q4_K backend. The token sequence matched on every utterance; 98.0% of TensorRT boundaries and 96.2% of GGUF boundaries are exactly equal to the official output, and the mean absolute boundary difference is 4.71 ms and 8.73 ms respectively.
 
 The aligner decoder also runs as a plain TensorRT engine, since the aligner needs a single forward pass and no KV cache. With the TensorRT bf16 decoder in place of EXL3, the same pipeline reaches 25.06 ms median and 42.02 ms P90, with 99.2% exact boundaries and 1.50 ms mean absolute boundary difference.
 
@@ -57,6 +57,6 @@ uv run qwen3-asr align .\audio.wav `
 
 aligner 的分类头只有 5,000 个真实行。导出时把 LM head 用零补齐到 152,064 行，并保持 16-bit，避免量化破坏分类头。运行时一次前向处理完整 prompt，在每个 `<timestamp>` 位置取 argmax。
 
-在全部 2,620 条 LibriSpeech `test-clean`、52,576 个对齐项上，TensorRT BF16 encoder + EXL3 4 bpw decoder 的中位延迟为 39.52 ms，P90 为 63.87 ms；官方 Transformers BF16 后端分别为 93.13 ms 和 114.06 ms，GGUF INT4 + Q4_K 后端分别为 146.73 ms 和 186.88 ms。所有音频的 token 序列一致；98.0% 的 TensorRT 边界和 96.2% 的 GGUF 边界与官方输出完全相同，平均绝对边界差分别为 4.71 ms 和 8.73 ms。
+在全部 2,620 条 LibriSpeech `test-clean`、52,576 个对齐项上，TensorRT BF16 encoder + EXL3 4 bpw decoder 的中位延迟为 39.52 ms，P90 为 63.87 ms；官方 Transformers BF16 后端分别为 93.13 ms 和 114.06 ms，GGUF INT4 + Q4_K 后端分别为 139.55 ms 和 186.88 ms。所有音频的 token 序列一致；98.0% 的 TensorRT 边界和 96.2% 的 GGUF 边界与官方输出完全相同，平均绝对边界差分别为 4.71 ms 和 8.73 ms。
 
 这些权重基于 `Qwen/Qwen3-ForcedAligner-0.6B`，以 Apache-2.0 发布。请保留上游归属和许可证说明。

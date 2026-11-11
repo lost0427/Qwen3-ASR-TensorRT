@@ -155,7 +155,7 @@ LibriSpeech `test-clean`, all 2,620 utterances, 53,120 reference words.
 
 Forced alignment on the same corpus: 25.06 ms median with the TensorRT bf16
 aligner decoder and 39.52 ms with the EXL3 4 bpw aligner decoder, versus
-93.13 ms for the official backend and 146.73 ms for GGUF. 99.2% of TensorRT
+93.13 ms for the official backend and 139.55 ms for GGUF. 99.2% of TensorRT
 boundaries are exactly equal to the official output.
 
 ![Aligner comparison](docs/windows-librispeech-qwen3-aligner-comparison.png)

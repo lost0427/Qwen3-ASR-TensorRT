@@ -148,7 +148,7 @@ LibriSpeech `test-clean` 全量 2,620 条音频、53,120 个参考词。
 
 ![1.7B 分阶段中位延迟](docs/windows-librispeech-qwen3-1.7b-stage-latency.png)
 
-强制对齐在同样语料上：TensorRT bf16 aligner decoder 25.06 ms 中位延迟，EXL3 4 bpw aligner decoder 39.52 ms；官方后端 93.13 ms，GGUF 146.73 ms。TensorRT 的边界有 99.2% 与官方完全相同。
+强制对齐在同样语料上：TensorRT bf16 aligner decoder 25.06 ms 中位延迟，EXL3 4 bpw aligner decoder 39.52 ms；官方后端 93.13 ms，GGUF 139.55 ms。TensorRT 的边界有 99.2% 与官方完全相同。
 
 ![对齐器对比](docs/windows-librispeech-qwen3-aligner-comparison.png)
 
