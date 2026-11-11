@@ -129,3 +129,35 @@ curl.exe -X POST "http://127.0.0.1:8000/v1/transcribe?language=Chinese" `
 ```
 
 The API binds to loopback by default and accepts WAV, MP3, FLAC, OGG, M4A, and AAC uploads.
+
+## Benchmarks
+
+LibriSpeech `test-clean`, all 2,620 utterances, 53,120 reference words.
+
+| Model | Backend | Corpus WER | Median ms |
+| --- | --- | ---: | ---: |
+| 0.6B | Official Transformers BF16 | 2.321% | 787.1 |
+| 0.6B | GGUF INT4 + Q4_K | 2.982% | 299.2 |
+| 0.6B | TensorRT BF16 + EXL3 4 bpw | 2.423% | 96.7 |
+| 0.6B | TensorRT BF16 + EXL3 4 bpw, train-clean-100 | **2.342%** | 96.8 |
+| 1.7B | Official Transformers BF16 | 1.886% | 863.5 |
+| 1.7B | GGUF INT4 + Q4_K | 2.090% | 391.8 |
+| 1.7B | TensorRT BF16 + EXL3 4 bpw | 1.939% | 204.4 |
+| 1.7B | TensorRT BF16 + EXL3 4 bpw, train-clean-100 | **1.911%** | 205.1 |
+
+![0.6B calibration vs GGUF and official](docs/windows-librispeech-qwen3-0.6b-calibration-vs-gguf.png)
+
+![0.6B median latency by stage](docs/windows-librispeech-qwen3-0.6b-stage-latency.png)
+
+![1.7B calibration vs GGUF and official](docs/windows-librispeech-qwen3-1.7b-calibration-vs-gguf.png)
+
+![1.7B median latency by stage](docs/windows-librispeech-qwen3-1.7b-stage-latency.png)
+
+Forced alignment on the same corpus: 25.06 ms median with the TensorRT bf16
+aligner decoder and 39.52 ms with the EXL3 4 bpw aligner decoder, versus
+93.13 ms for the official backend and 146.73 ms for GGUF. 99.2% of TensorRT
+boundaries are exactly equal to the official output.
+
+![Aligner comparison](docs/windows-librispeech-qwen3-aligner-comparison.png)
+
+![Aligner median latency by stage](docs/windows-librispeech-qwen3-aligner-stage-latency.png)

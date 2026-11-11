@@ -124,3 +124,32 @@ curl.exe -X POST "http://127.0.0.1:8000/v1/transcribe?language=Chinese" `
 ```
 
 API 默认只监听本机地址，支持 WAV、MP3、FLAC、OGG、M4A 和 AAC 音频。
+
+## 基准测试
+
+LibriSpeech `test-clean` 全量 2,620 条音频、53,120 个参考词。
+
+| 模型 | 后端 | Corpus WER | 中位延迟 ms |
+| --- | --- | ---: | ---: |
+| 0.6B | 官方 Transformers BF16 | 2.321% | 787.1 |
+| 0.6B | GGUF INT4 + Q4_K | 2.982% | 299.2 |
+| 0.6B | TensorRT BF16 + EXL3 4 bpw | 2.423% | 96.7 |
+| 0.6B | TensorRT BF16 + EXL3 4 bpw，train-clean-100 | **2.342%** | 96.8 |
+| 1.7B | 官方 Transformers BF16 | 1.886% | 863.5 |
+| 1.7B | GGUF INT4 + Q4_K | 2.090% | 391.8 |
+| 1.7B | TensorRT BF16 + EXL3 4 bpw | 1.939% | 204.4 |
+| 1.7B | TensorRT BF16 + EXL3 4 bpw，train-clean-100 | **1.911%** | 205.1 |
+
+![0.6B 校准对比与 GGUF、官方后端](docs/windows-librispeech-qwen3-0.6b-calibration-vs-gguf.png)
+
+![0.6B 分阶段中位延迟](docs/windows-librispeech-qwen3-0.6b-stage-latency.png)
+
+![1.7B 校准对比与 GGUF、官方后端](docs/windows-librispeech-qwen3-1.7b-calibration-vs-gguf.png)
+
+![1.7B 分阶段中位延迟](docs/windows-librispeech-qwen3-1.7b-stage-latency.png)
+
+强制对齐在同样语料上：TensorRT bf16 aligner decoder 25.06 ms 中位延迟，EXL3 4 bpw aligner decoder 39.52 ms；官方后端 93.13 ms，GGUF 146.73 ms。TensorRT 的边界有 99.2% 与官方完全相同。
+
+![对齐器对比](docs/windows-librispeech-qwen3-aligner-comparison.png)
+
+![对齐器分阶段中位延迟](docs/windows-librispeech-qwen3-aligner-stage-latency.png)
