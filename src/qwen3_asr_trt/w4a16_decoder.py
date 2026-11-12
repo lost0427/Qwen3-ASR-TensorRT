@@ -28,22 +28,32 @@ class _RMSNorm:
 
 
 class _PackedLinear:
-    """Bias-free projection evaluated one token at a time."""
+    """Bias-free projection evaluated one token at a time.
 
-    def __init__(self, weight: Tensor):
+    ``keep_fp16`` is used by the mixed-precision probe: the projection then runs
+    as a plain fp16 matmul instead of the INT4 GEMV.
+    """
+
+    def __init__(self, weight: Tensor, group: int = 64, keep_fp16: bool = False):
         weight = weight.detach().to(device="cuda", dtype=torch.float16).contiguous()
-        self.packed = extension().pack(weight)
-        self.scales = extension().scale(weight)
         self.out_features = weight.shape[0]
+        self.fp16 = weight if keep_fp16 else None
+        self.packed = None if keep_fp16 else extension().pack(weight, group)
+        self.scales = None if keep_fp16 else extension().scale(weight, group)
 
     def __call__(self, x: Tensor, residual: Tensor | None = None) -> Tensor:
-        if residual is None:
+        if self.packed is None:
+            out = x.reshape(1, -1) @ self.fp16.T
+        elif residual is None:
             out = extension().gemv(x.reshape(1, -1).contiguous(), self.packed, self.scales)
         else:
             out = extension().gemv_residual(
                 x.reshape(1, -1).contiguous(), self.packed, self.scales, residual.reshape(1, -1)
             )
-        return out.view(*x.shape[:-1], self.out_features)
+        out = out.view(*x.shape[:-1], self.out_features)
+        if residual is not None and self.packed is None:
+            out = out + residual
+        return out
 
 
 class _TRTPrefill:
@@ -92,11 +102,15 @@ class W4A16ASRDecoder:
         model_id: str,
         prefill_engine: Path,
         max_cache: int = 2048,
+        group: int = 64,
+        keep_fp16: frozenset[str] = frozenset(),
     ):
         from transformers import AutoConfig, AutoModelForMultimodalLM
 
         self.torch = torch
         self.max_cache = max_cache
+        self.group = group
+        self.keep_fp16 = set(keep_fp16)
         config = AutoConfig.from_pretrained(str(model_id), local_files_only=True)
         text = getattr(config, "text_config", config)
 
@@ -119,7 +133,7 @@ class W4A16ASRDecoder:
         cuda = torch.device("cuda")
 
         self.embed = language.embed_tokens.weight.detach().to(cuda, torch.float16).contiguous()
-        self.lm_head = _PackedLinear(model.lm_head.weight)
+        self.lm_head = _PackedLinear(model.lm_head.weight, group)
         self.final_norm = _RMSNorm(language.norm.weight, self.eps)
 
         self.qkv, self.o_proj, self.gu, self.down = [], [], [], []
@@ -127,10 +141,10 @@ class W4A16ASRDecoder:
         self.in_norm, self.post_norm = [], []
         for layer in language.layers:
             attn = layer.self_attn
-            self.qkv.append(_PackedLinear(torch.cat([attn.q_proj.weight, attn.k_proj.weight, attn.v_proj.weight], 0)))
-            self.o_proj.append(_PackedLinear(attn.o_proj.weight))
-            self.gu.append(_PackedLinear(torch.cat([layer.mlp.gate_proj.weight, layer.mlp.up_proj.weight], 0)))
-            self.down.append(_PackedLinear(layer.mlp.down_proj.weight))
+            self.qkv.append(_PackedLinear(torch.cat([attn.q_proj.weight, attn.k_proj.weight, attn.v_proj.weight], 0), group, "qkv" in self.keep_fp16))
+            self.o_proj.append(_PackedLinear(attn.o_proj.weight, group, "o" in self.keep_fp16))
+            self.gu.append(_PackedLinear(torch.cat([layer.mlp.gate_proj.weight, layer.mlp.up_proj.weight], 0), group, "gu" in self.keep_fp16))
+            self.down.append(_PackedLinear(layer.mlp.down_proj.weight, group, "down" in self.keep_fp16))
             self.q_norm.append(_RMSNorm(attn.q_norm.weight, self.eps))
             self.k_norm.append(_RMSNorm(attn.k_norm.weight, self.eps))
             self.in_norm.append(_RMSNorm(layer.input_layernorm.weight, self.eps))

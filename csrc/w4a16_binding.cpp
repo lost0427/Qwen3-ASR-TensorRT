@@ -5,9 +5,10 @@
 #include <cuda_runtime.h>
 
 void w4a16_gemv_launch(const void* x, const void* qweight, const void* scales, void* y,
-                       int rows, int k, cudaStream_t stream);
+                       int rows, int k, int group, cudaStream_t stream);
 void w4a16_gemv_launch(const void* x, const void* qweight, const void* scales,
-                       const void* residual, void* y, int rows, int k, cudaStream_t stream);
+                       const void* residual, void* y, int rows, int k, int group,
+                       cudaStream_t stream);
 void qk_norm_rope_launch(void* vectors, const void* weight, const void* cos, const void* sin,
                          int heads, int head_dim, float eps, cudaStream_t stream);
 void silu_mul_launch(const void* gate_up, void* out, int width, cudaStream_t stream);
@@ -30,11 +31,13 @@ torch::Tensor w4a16_gemv(torch::Tensor x, torch::Tensor qweight, torch::Tensor s
   const int k = static_cast<int>(x.size(1));
   const int rows = static_cast<int>(qweight.size(0));
   TORCH_CHECK(qweight.size(1) == k / 2, "packed weight width must be K / 2");
-  TORCH_CHECK(k % 64 == 0, "K must be a multiple of 64");
+  const int group = static_cast<int>(k / scales.size(1));
+  TORCH_CHECK(group == 32 || group == 64, "group size must be 32 or 64");
+  TORCH_CHECK(k % 1024 == 0, "K must be a multiple of 1024");
 
   auto y = torch::empty({1, rows}, x.options());
   w4a16_gemv_launch(x.data_ptr(), qweight.data_ptr(), scales.data_ptr(), y.data_ptr(),
-                    rows, k, c10::cuda::getCurrentCUDAStream().stream());
+                    rows, k, group, c10::cuda::getCurrentCUDAStream().stream());
   return y;
 }
 
@@ -42,9 +45,10 @@ torch::Tensor w4a16_gemv_residual(torch::Tensor x, torch::Tensor qweight, torch:
                                  torch::Tensor residual) {
   const int k = static_cast<int>(x.size(1));
   const int rows = static_cast<int>(qweight.size(0));
+  const int group = static_cast<int>(k / scales.size(1));
   auto y = torch::empty({1, rows}, x.options());
   w4a16_gemv_launch(x.contiguous().data_ptr(), qweight.data_ptr(), scales.data_ptr(),
-                    residual.contiguous().data_ptr(), y.data_ptr(), rows, k,
+                    residual.contiguous().data_ptr(), y.data_ptr(), rows, k, group,
                     c10::cuda::getCurrentCUDAStream().stream());
   return y;
 }
@@ -90,14 +94,15 @@ torch::Tensor decode_attention(torch::Tensor q, torch::Tensor k_cache, torch::Te
   return out;
 }
 
-torch::Tensor pack_w4a16(torch::Tensor weight) {
+torch::Tensor pack_w4a16(torch::Tensor weight, int64_t group) {
   TORCH_CHECK(weight.is_cuda() && weight.scalar_type() == torch::kHalf, "weight must be fp16 CUDA");
   TORCH_CHECK(weight.dim() == 2, "weight must be [rows, K]");
   const auto rows = weight.size(0);
   const auto k = weight.size(1);
-  TORCH_CHECK(k % 64 == 0, "K must be a multiple of 64");
+  const int block = static_cast<int>(group);
+  TORCH_CHECK(k % block == 0, "K must be a multiple of the group size");
 
-  auto values = weight.to(torch::kFloat).view({rows, k / 64, 64});
+  auto values = weight.to(torch::kFloat).view({rows, k / block, block});
   auto scales = values.abs().amax(-1) / 7.0;
   scales = torch::where(scales > 0, scales, torch::ones_like(scales)).to(torch::kHalf);
   auto quantized = torch::round(values / scales.to(torch::kFloat).unsqueeze(-1))
@@ -109,10 +114,11 @@ torch::Tensor pack_w4a16(torch::Tensor weight) {
   return packed.contiguous();
 }
 
-torch::Tensor scale_w4a16(torch::Tensor weight) {
+torch::Tensor scale_w4a16(torch::Tensor weight, int64_t group) {
   const auto rows = weight.size(0);
   const auto k = weight.size(1);
-  auto values = weight.to(torch::kFloat).view({rows, k / 64, 64});
+  const int block = static_cast<int>(group);
+  auto values = weight.to(torch::kFloat).view({rows, k / block, block});
   auto scales = values.abs().amax(-1) / 7.0;
   return torch::where(scales > 0, scales, torch::ones_like(scales)).to(torch::kHalf).contiguous();
 }

@@ -146,8 +146,8 @@ def quantize_encoder_int4(input_onnx: Path, output_onnx: Path, block_size: int =
         raise FileNotFoundError(f"FP16 encoder ONNX not found: {input_onnx}")
     if input_onnx.resolve() == output_onnx.resolve():
         raise ValueError("Input and output ONNX paths must be different")
-    if block_size != 64:
-        raise ValueError("TensorRT INT4 weight-only quantization uses 64-value blocks")
+    if block_size not in (32, 64, 128):
+        raise ValueError("TensorRT weight-only quantization supports 32, 64 or 128-value blocks")
 
     model = onnx.load(str(input_onnx), load_external_data=True)
     initializers = {item.name: item for item in model.graph.initializer}

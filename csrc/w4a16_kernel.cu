@@ -19,8 +19,8 @@ constexpr int kWarps = 8;
 constexpr int kBlock = kWarps * 32;
 constexpr int kNibblesPerLane = 32;
 constexpr int kValuesPerWarpStep = 32 * kNibblesPerLane;   // 1024
-constexpr int kLanesPerGroup = 64 / kNibblesPerLane;       // 2 lanes share a 64-value group
 
+template <int kGroup>
 __global__ void w4a16_gemv_kernel(const __half* __restrict__ x,
                                   const uint8_t* __restrict__ qweight,
                                   const __half* __restrict__ scales,
@@ -35,9 +35,11 @@ __global__ void w4a16_gemv_kernel(const __half* __restrict__ x,
 
   const int lane = threadIdx.x & 31;
   const int warp = threadIdx.x >> 5;
-  const int groups = k >> 6;
+  const int groups = k / kGroup;
   const int packed_row = k >> 1;
   const int steps = k / kValuesPerWarpStep;
+  constexpr int kLanesPerGroup = kGroup / kNibblesPerLane;
+  constexpr int kGroupsPerStep = kValuesPerWarpStep / kGroup;
   const int lane_group = lane / kLanesPerGroup;
 
   for (int n = blockIdx.x * kWarps + warp; n < rows; n += gridDim.x * kWarps) {
@@ -63,7 +65,7 @@ __global__ void w4a16_gemv_kernel(const __half* __restrict__ x,
           hi_acc += hi * xv.y;
         }
       }
-      const int scale_index = step * (kValuesPerWarpStep / 64) + lane_group;
+      const int scale_index = step * kGroupsPerStep + lane_group;
       acc += (lo_acc + hi_acc) * __half2float(row_scales[scale_index]);
     }
 #pragma unroll
@@ -80,18 +82,30 @@ __global__ void w4a16_gemv_kernel(const __half* __restrict__ x,
 }  // namespace
 
 void w4a16_gemv_launch(const void* x, const void* qweight, const void* scales,
-                       const void* residual, void* y, int rows, int k, cudaStream_t stream) {
+                       const void* residual, void* y, int rows, int k, int group,
+                       cudaStream_t stream) {
   const int grid = (rows + kWarps - 1) / kWarps < 65535 ? (rows + kWarps - 1) / kWarps : 65535;
-  w4a16_gemv_kernel<<<grid, kBlock, k * sizeof(__half), stream>>>(
-      reinterpret_cast<const __half*>(x),
-      reinterpret_cast<const uint8_t*>(qweight),
-      reinterpret_cast<const __half*>(scales),
-      reinterpret_cast<const __half*>(residual),
-      reinterpret_cast<__half*>(y),
-      rows, k);
+  const size_t shared = k * sizeof(__half);
+  if (group == 32) {
+    w4a16_gemv_kernel<32><<<grid, kBlock, shared, stream>>>(
+        reinterpret_cast<const __half*>(x),
+        reinterpret_cast<const uint8_t*>(qweight),
+        reinterpret_cast<const __half*>(scales),
+        reinterpret_cast<const __half*>(residual),
+        reinterpret_cast<__half*>(y),
+        rows, k);
+  } else {
+    w4a16_gemv_kernel<64><<<grid, kBlock, shared, stream>>>(
+        reinterpret_cast<const __half*>(x),
+        reinterpret_cast<const uint8_t*>(qweight),
+        reinterpret_cast<const __half*>(scales),
+        reinterpret_cast<const __half*>(residual),
+        reinterpret_cast<__half*>(y),
+        rows, k);
+  }
 }
 
 void w4a16_gemv_launch(const void* x, const void* qweight, const void* scales, void* y,
-                       int rows, int k, cudaStream_t stream) {
-  w4a16_gemv_launch(x, qweight, scales, nullptr, y, rows, k, stream);
+                       int rows, int k, int group, cudaStream_t stream) {
+  w4a16_gemv_launch(x, qweight, scales, nullptr, y, rows, k, group, stream);
 }
