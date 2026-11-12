@@ -94,9 +94,11 @@ uv run python tools\quantize_awq.py --group 32 --utterances 128 ^
   --output models\Qwen3-ASR-0.6B-hf-awq32 --report artifacts\awq32-report.json
 ```
 
-The resulting checkpoint is a plain FP16 model with folded scales, so it loads with `transformers` and reproduces the base model. The INT4 packing happens when the decoder is constructed (`W4A16ASRDecoder`), and the prefill engine should be built as FP16 — quantising prefill costs accuracy and does not speed it up.
+The resulting checkpoint is a plain FP16 model with folded scales, so it loads with `transformers` and reproduces the base model. The INT4 packing happens when the decoder is constructed (`W4A16ASRDecoder`). Build the 0.6B prefill engine as FP16: on 2,620 utterances that measured 0.089 points better WER than an INT4 prefill engine and 1.7 ms faster.
 
-On an 8 GB card the 1.7B FP16 prefill engine (3.3 GB) leaves too little headroom next to the decoder weights, and TensorRT's weight pages start thrashing. For that size build the prefill engine with `quantize_encoder_int4` instead; measured on 2,620 utterances it was both faster and no less accurate than the FP16 variant.
+On an 8 GB card the 1.7B FP16 prefill engine (3.3 GB) leaves too little headroom next to the decoder weights, and TensorRT's weight pages start thrashing. Build that one with `quantize_encoder_int4`; on 2,620 utterances the INT4 engine measured 0.015 points worse WER and 5 ms faster.
+
+The audio encoder reproduces the reference inference windows (`n_window_infer`, 104 tokens) instead of attending over the whole utterance. Its output matches the Transformers reference at cosine 0.9995–0.9999 across one to five windows; corpus WER moved by ±0.04 points across decoders, a 20-edit scale on this corpus.
 
 
 TensorRT engines are generated locally for the target GPU and TensorRT environment.
@@ -148,20 +150,20 @@ The API binds to loopback by default and accepts WAV, MP3, FLAC, OGG, M4A, and A
 
 ## Benchmarks
 
-LibriSpeech `test-clean`, all 2,620 utterances, 53,120 reference words.
+LibriSpeech `test-clean`, all 2,620 utterances, 53,120 reference words. Latencies are full-corpus medians; 30–200-utterance subsets run 20–40% higher because the first utterances pay for process and clock warm-up. Corpus WER is deterministic and reproduces across sessions; latency is only comparable within one session. The EXL3 4 bpw and W4A16 rows were measured together on 2026-11-12 with the windowed encoder; the 3 bpw and GGUF rows are the 2026-11-11 runs.
 
 | Model | Backend | Corpus WER | Median ms |
 | --- | --- | ---: | ---: |
 | 0.6B | Official Transformers BF16 | 2.321% | 787.1 |
 | 0.6B | GGUF INT4 + Q4_K | 2.982% | 299.2 |
-| 0.6B | TensorRT fp16 + W4A16 AWQ (g32) | 2.397% | **81.6** |
-| 0.6B | TensorRT BF16 + EXL3 4 bpw | 2.423% | 96.7 |
-| 0.6B | TensorRT BF16 + EXL3 4 bpw, train-clean-100 | **2.342%** | 96.8 |
+| 0.6B | TensorRT fp16 + W4A16 AWQ (g32) | 2.397% | **72.2** |
+| 0.6B | TensorRT BF16 + EXL3 4 bpw | 2.383% | 99.5 |
+| 0.6B | TensorRT BF16 + EXL3 4 bpw, train-clean-100 | **2.362%** | 99.8 |
 | 1.7B | Official Transformers BF16 | 1.886% | 863.5 |
 | 1.7B | GGUF INT4 + Q4_K | 2.090% | 391.8 |
-| 1.7B | TensorRT INT4 + W4A16 AWQ (g32) | 2.003% | 223.6 |
-| 1.7B | TensorRT BF16 + EXL3 4 bpw | 1.939% | 204.4 |
-| 1.7B | TensorRT BF16 + EXL3 4 bpw, train-clean-100 | **1.911%** | 205.1 |
+| 1.7B | TensorRT INT4 + W4A16 AWQ (g32) | 2.003% | **192.7** |
+| 1.7B | TensorRT BF16 + EXL3 4 bpw | 1.984% | 208.8 |
+| 1.7B | TensorRT BF16 + EXL3 4 bpw, train-clean-100 | **1.944%** | 208.1 |
 
 ![0.6B calibration vs GGUF and official](docs/windows-librispeech-qwen3-0.6b-calibration-vs-gguf.png)
 

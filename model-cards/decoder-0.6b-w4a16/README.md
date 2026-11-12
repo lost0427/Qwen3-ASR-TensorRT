@@ -34,13 +34,13 @@ All numbers are the 2,620 LibriSpeech `test-clean` utterances, greedy decoding, 
 
 | Backend | Corpus WER | Median latency |
 | --- | ---: | ---: |
-| Official `qwen-asr` Transformers BF16 | 2.3212% | 787.12 ms |
-| EXL3 4 bpw, train-clean-100 | 2.3419% | 96.83 ms |
-| **W4A16 AWQ, group 32** | **2.3965%** | **81.56 ms** |
-| EXL3 4 bpw, legacy | 2.4228% | 96.65 ms |
-| GGUF INT4 + Q4_K | 2.9819% | 299.20 ms |
+| Official `qwen-asr` Transformers BF16 | 2.321% | 787.1 ms |
+| EXL3 4 bpw, train-clean-100 | 2.362% | 99.8 ms |
+| **W4A16 AWQ, group 32** | **2.397%** | **72.2 ms** |
+| EXL3 4 bpw, legacy | 2.383% | 99.5 ms |
+| GGUF INT4 + Q4_K | 2.982% | 299.2 ms |
 
-It is 1.19× faster than the fastest EXL3 4 bpw decoder and 0.026 points better on WER than the legacy one, while remaining 0.055 points behind the calibrated EXL3 variant.
+This decoder runs 1.38× faster than both EXL3 4 bpw decoders. Its corpus WER is 0.014 points above the legacy decoder and 0.035 above the calibrated one; a 20-edit difference on this corpus corresponds to about 0.02 points, so the three sit at the same level.
 
 ### Calibration
 
@@ -72,13 +72,13 @@ Windows is tested and supported. Linux should work with compatible CUDA, TensorR
 
 | 后端 | 语料 WER | 中位延迟 |
 | --- | ---: | ---: |
-| 官方 `qwen-asr` Transformers BF16 | 2.3212% | 787.12 ms |
-| EXL3 4 bpw，train-clean-100 校准 | 2.3419% | 96.83 ms |
-| **W4A16 AWQ，group 32** | **2.3965%** | **81.56 ms** |
-| EXL3 4 bpw，旧版 | 2.4228% | 96.65 ms |
-| GGUF INT4 + Q4_K | 2.9819% | 299.20 ms |
+| 官方 `qwen-asr` Transformers BF16 | 2.321% | 787.1 ms |
+| EXL3 4 bpw，train-clean-100 校准 | 2.362% | 99.8 ms |
+| **W4A16 AWQ，group 32** | **2.397%** | **72.2 ms** |
+| EXL3 4 bpw，旧版 | 2.383% | 99.5 ms |
+| GGUF INT4 + Q4_K | 2.982% | 299.2 ms |
 
-比最快的 EXL3 4 bpw 解码器快 1.19 倍，WER 比旧版 EXL3 好 0.026 个百分点，比校准版落后 0.055 个百分点。
+本解码器比两个 EXL3 4 bpw 解码器都快 1.38 倍。语料 WER 比旧版高 0.014 个百分点、比校准版高 0.035 个百分点；本语料上 20 个编辑的差异约对应 0.02 个百分点，三者处于同一水平。
 
 ### 标定
 

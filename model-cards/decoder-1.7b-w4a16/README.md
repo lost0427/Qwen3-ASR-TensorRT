@@ -35,12 +35,12 @@ All numbers are the 2,620 LibriSpeech `test-clean` utterances, greedy decoding, 
 | Backend | Corpus WER | Median latency |
 | --- | ---: | ---: |
 | Official `qwen-asr` Transformers BF16 | 1.886% | 863.5 ms |
-| EXL3 4 bpw, train-clean-100 | 1.911% | 205.1 ms |
-| EXL3 4 bpw, legacy | 1.939% | 204.4 ms |
-| **W4A16 AWQ, group 32** | **2.003%** | **223.6 ms** |
+| EXL3 4 bpw, train-clean-100 | 1.944% | 208.1 ms |
+| EXL3 4 bpw, legacy | 1.984% | 208.8 ms |
+| **W4A16 AWQ, group 32** | **2.003%** | **192.7 ms** |
 | GGUF INT4 + Q4_K | 2.090% | 391.8 ms |
 
-Unlike the 0.6B variant, this size does not beat EXL3: it is 0.064 points behind the legacy EXL3 decoder and 9% slower, while still being 1.75× faster than GGUF and 0.087 points better.
+This decoder runs 1.08× faster than both EXL3 4 bpw decoders, 2.03× faster than GGUF, and 4.48× faster than the official backend. Its corpus WER is 0.019 points above the legacy EXL3 decoder and 0.059 above the calibrated one; a 20-edit difference on this corpus corresponds to about 0.02 points.
 
 ### Prefill
 
@@ -74,12 +74,12 @@ Calibration used 128 utterances from LibriSpeech `train-clean-100`. No `test-cle
 | 后端 | 语料 WER | 中位延迟 |
 | --- | ---: | ---: |
 | 官方 `qwen-asr` Transformers BF16 | 1.886% | 863.5 ms |
-| EXL3 4 bpw，train-clean-100 校准 | 1.911% | 205.1 ms |
-| EXL3 4 bpw，旧版 | 1.939% | 204.4 ms |
-| **W4A16 AWQ，group 32** | **2.003%** | **223.6 ms** |
+| EXL3 4 bpw，train-clean-100 校准 | 1.944% | 208.1 ms |
+| EXL3 4 bpw，旧版 | 1.984% | 208.8 ms |
+| **W4A16 AWQ，group 32** | **2.003%** | **192.7 ms** |
 | GGUF INT4 + Q4_K | 2.090% | 391.8 ms |
 
-与 0.6B 不同，这个尺寸**没有**超过 EXL3：比旧版 EXL3 差 0.064 个百分点、慢 9%，但比 GGUF 快 1.75 倍、WER 好 0.087 个百分点。
+本解码器比两个 EXL3 4 bpw 解码器都快 1.08 倍、比 GGUF 快 2.03 倍、比官方后端快 4.48 倍。语料 WER 比旧版 EXL3 高 0.019 个百分点、比校准版高 0.059 个百分点；本语料上 20 个编辑的差异约对应 0.02 个百分点。
 
 ### prefill
 

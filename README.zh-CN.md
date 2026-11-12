@@ -94,9 +94,11 @@ uv run python tools\quantize_awq.py --group 32 --utterances 128 ^
   --output models\Qwen3-ASR-0.6B-hf-awq32 --report artifacts\awq32-report.json
 ```
 
-得到的 checkpoint 是折叠过缩放的普通 FP16 模型，用 `transformers` 加载即可复现原模型；真正的 INT4 打包发生在构造 `W4A16ASRDecoder` 时。0.6B 的 prefill 引擎建议用 FP16 构建 —— 量化 prefill 既不更快，还会损失精度。
+得到的 checkpoint 是折叠过缩放的普通 FP16 模型，用 `transformers` 加载即可复现原模型；真正的 INT4 打包发生在构造 `W4A16ASRDecoder` 时。0.6B 的 prefill 引擎用 FP16 构建：在 2,620 条语料上，它比 INT4 prefill 的 WER 好 0.089 个百分点、快 1.7 ms。
 
-但在 8 GB 显存下，1.7B 的 FP16 prefill 引擎（3.3 GB）与 decoder 权重放在一起余量太小，TensorRT 的权重页会被驱动换出，反而拖慢 10 倍以上。这个尺寸请用 `quantize_encoder_int4` 构建 INT4 prefill 引擎；在 2,620 条语料上实测，它比 FP16 版本又快又不损失精度。
+在 8 GB 显存下，1.7B 的 FP16 prefill 引擎（3.3 GB）与 decoder 权重放在一起余量太小，TensorRT 的权重页会被驱动换出。这个尺寸用 `quantize_encoder_int4` 构建 INT4 prefill 引擎；在 2,620 条语料上，它的 WER 差 0.015 个百分点、快 5 ms。
+
+音频编码器按参考实现的推理窗口（`n_window_infer`，104 个 token）做分段注意力，不再对整段音频做全局注意力。其输出在 1–5 个窗口上与 Transformers 参考实现的余弦相似度为 0.9995–0.9999；corpus WER 在各解码器上的变化为 ±0.04 个百分点，在本语料上相当于 20 个编辑。
 
 
 TensorRT engine 会根据目标 GPU 和本机 TensorRT 环境在本地构建。
@@ -143,20 +145,20 @@ API 默认只监听本机地址，支持 WAV、MP3、FLAC、OGG、M4A 和 AAC �
 
 ## 基准测试
 
-LibriSpeech `test-clean` 全量 2,620 条音频、53,120 个参考词。
+LibriSpeech `test-clean` 全量 2,620 条音频、53,120 个参考词。延迟为全量中位数；30–200 条的子集因前若干条要付进程与频率爬升的代价，会高 20–40%。Corpus WER 是确定性的、可跨 session 复现；延迟只在同一 session 内可比。EXL3 4 bpw 与 W4A16 各行于 2026-11-12 使用窗口化编码器同批测量；3 bpw 与 GGUF 各行来自 2026-11-11 的运行。
 
 | 模型 | 后端 | Corpus WER | 中位延迟 ms |
 | --- | --- | ---: | ---: |
 | 0.6B | 官方 Transformers BF16 | 2.321% | 787.1 |
 | 0.6B | GGUF INT4 + Q4_K | 2.982% | 299.2 |
-| 0.6B | TensorRT fp16 + W4A16 AWQ (g32) | 2.397% | **81.6** |
-| 0.6B | TensorRT BF16 + EXL3 4 bpw | 2.423% | 96.7 |
-| 0.6B | TensorRT BF16 + EXL3 4 bpw，train-clean-100 | **2.342%** | 96.8 |
+| 0.6B | TensorRT fp16 + W4A16 AWQ (g32) | 2.397% | **72.2** |
+| 0.6B | TensorRT BF16 + EXL3 4 bpw | 2.383% | 99.5 |
+| 0.6B | TensorRT BF16 + EXL3 4 bpw，train-clean-100 | **2.362%** | 99.8 |
 | 1.7B | 官方 Transformers BF16 | 1.886% | 863.5 |
 | 1.7B | GGUF INT4 + Q4_K | 2.090% | 391.8 |
-| 1.7B | TensorRT INT4 + W4A16 AWQ (g32) | 2.003% | 223.6 |
-| 1.7B | TensorRT BF16 + EXL3 4 bpw | 1.939% | 204.4 |
-| 1.7B | TensorRT BF16 + EXL3 4 bpw，train-clean-100 | **1.911%** | 205.1 |
+| 1.7B | TensorRT INT4 + W4A16 AWQ (g32) | 2.003% | **192.7** |
+| 1.7B | TensorRT BF16 + EXL3 4 bpw | 1.984% | 208.8 |
+| 1.7B | TensorRT BF16 + EXL3 4 bpw，train-clean-100 | **1.944%** | 208.1 |
 
 ![0.6B 校准对比与 GGUF、官方后端](docs/windows-librispeech-qwen3-0.6b-calibration-vs-gguf.png)
 
