@@ -27,6 +27,11 @@ class DynamicAudioWindow:
                 self.num_heads = audio_tower.config.encoder_attention_heads
                 self.head_dim = audio_tower.config.d_model // self.num_heads
                 self.tokens_per_chunk = 13
+                # Transformers splits post-CNN tokens into inference windows of
+                # n_window_infer raw frames and attends inside each window only.
+                self.window_tokens = self.tokens_per_chunk * (
+                    audio_tower.config.n_window_infer // (audio_tower.config.n_window * 2)
+                )
 
             def forward(self, input_features, input_features_mask):
                 tower = self.audio_tower
@@ -56,10 +61,12 @@ class DynamicAudioWindow:
                         torch.zeros_like(chunk_lengths),
                     )
                 valid_lengths = chunk_lengths.sum(-1)
-                key_mask = torch.arange(
-                    hidden.shape[1],
-                    device=hidden.device,
-                ) >= valid_lengths.unsqueeze(-1)
+                positions = torch.arange(hidden.shape[1], device=hidden.device)
+                same_window = (positions[:, None] // self.window_tokens) == (
+                    positions[None, :] // self.window_tokens
+                )
+                padded = positions[None, :] >= valid_lengths.reshape(-1, 1)
+                key_mask = (~same_window).unsqueeze(0).unsqueeze(0) | padded[:, None, :]
 
                 for layer in tower.layers:
                     residual = hidden
@@ -75,7 +82,7 @@ class DynamicAudioWindow:
                         1, -1, self.num_heads, self.head_dim
                     ).transpose(1, 2)
                     scores = torch.matmul(q, k.transpose(-1, -2)) * attention.scaling
-                    scores = scores.masked_fill(key_mask[:, None, None, :], -1e4)
+                    scores = scores.masked_fill(key_mask, -1e4)
                     probs = F.softmax(scores, dim=-1, dtype=torch.float32).to(q.dtype)
                     attended = torch.matmul(probs, v).transpose(1, 2).reshape(1, -1, self.num_heads * self.head_dim)
                     hidden = residual + attention.out_proj(attended)
