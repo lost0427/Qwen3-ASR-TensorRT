@@ -17,15 +17,6 @@ from torch import Tensor
 
 from .w4a16 import extension
 
-BUCKETS = (64, 128, 256, 512, 1024, 2048)
-
-
-def _bucket(size: int) -> int:
-    for candidate in BUCKETS:
-        if size <= candidate:
-            return candidate
-    raise ValueError(f"sequence length {size} exceeds {BUCKETS[-1]}")
-
 
 class _RMSNorm:
     def __init__(self, weight: Tensor, eps: float):
@@ -154,7 +145,7 @@ class W4A16ASRDecoder:
         self.cos_table = table.cos().to(cuda, torch.float16).contiguous()
         self.sin_table = table.sin().to(cuda, torch.float16).contiguous()
 
-        size = (1, self.heads, max_cache, self.head_dim)
+        size = (1, self.kv_heads, max_cache, self.head_dim)
         self.cache_k = [torch.zeros(size, dtype=torch.float16, device=cuda) for _ in range(self.layers)]
         self.cache_v = [torch.zeros(size, dtype=torch.float16, device=cuda) for _ in range(self.layers)]
 
@@ -165,13 +156,12 @@ class W4A16ASRDecoder:
         self._produced = torch.zeros((max_cache,), dtype=torch.long, device=cuda)
         self._generated = torch.zeros((1,), dtype=torch.long, device=cuda)
         self._logits = torch.empty((1, self.vocab), dtype=torch.float16, device=cuda)
-        self._graphs: dict[int, torch.cuda.CUDAGraph] = {}
-        self.last_bucket = None
+        self._attn_out = torch.empty((1, self.heads * self.head_dim), dtype=torch.float16, device=cuda)
+        self._captured: torch.cuda.CUDAGraph | None = None
 
     # ---------------------------------------------------------------- forward
 
-    def _layer(self, index: int, hidden: Tensor, pos: Tensor, mask: Tensor, cos: Tensor, sin: Tensor,
-               bucket: int) -> Tensor:
+    def _layer(self, index: int, hidden: Tensor, pos: Tensor, cos: Tensor, sin: Tensor) -> Tensor:
         normed = self.in_norm[index](hidden)
         qkv = self.qkv[index](normed)
         q_dim = self.heads * self.head_dim
@@ -181,36 +171,28 @@ class W4A16ASRDecoder:
         v = qkv[:, :, q_dim + k_dim:]
         extension().qk_norm_rope(q, k, self.q_norm[index].weight, self.k_norm[index].weight,
                                  cos, sin, self.eps)
-        q = q.view(1, self.heads, 1, self.head_dim)
-        k = k.view(1, self.kv_heads, 1, self.head_dim)
-        v = v.view(1, self.kv_heads, 1, self.head_dim)
 
         cache_k = self.cache_k[index]
         cache_v = self.cache_v[index]
-        if self.groups != 1:
-            k = k.repeat_interleave(self.groups, 1)
-            v = v.repeat_interleave(self.groups, 1)
-        cache_k.index_copy_(2, pos, k)
-        cache_v.index_copy_(2, pos, v)
-        keys = cache_k[:, :, :bucket]
-        values = cache_v[:, :, :bucket]
-        attended = F.scaled_dot_product_attention(q, keys, values, attn_mask=mask)
-        hidden = self.o_proj[index](attended.reshape(1, 1, -1), hidden)
+        extension().cache_write(cache_k, cache_v, k, v, pos)
+
+        attended = self._attn_out
+        extension().attention(q, cache_k, cache_v, pos, attended, self.groups)
+        hidden = self.o_proj[index](attended, hidden)
 
         normed = self.post_norm[index](hidden)
         gate_up = self.gu[index](normed)
         gated = extension().silu_mul(gate_up, self.intermediate)
         return self.down[index](gated, hidden)
 
-    def _step(self, bucket: int) -> None:
+    def _step(self) -> None:
         torch = self.torch
         pos = self._pos
         cos = self.cos_table.index_select(0, pos).unsqueeze(0).unsqueeze(0)
         sin = self.sin_table.index_select(0, pos).unsqueeze(0).unsqueeze(0)
-        mask = (torch.arange(bucket, device=pos.device) <= pos).view(1, 1, 1, bucket)
         hidden = F.embedding(self._token.view(1, 1), self.embed)
         for index in range(self.layers):
-            hidden = self._layer(index, hidden, pos, mask, cos, sin, bucket)
+            hidden = self._layer(index, hidden, pos, cos, sin)
         logits = self.lm_head(self.final_norm(hidden))
         self._logits.copy_(logits.view(1, -1))
         token = logits.argmax(-1).view(1)
@@ -228,10 +210,9 @@ class W4A16ASRDecoder:
         self._token.copy_(token)
         self._generated.fill_(generated)
 
-    def _graph_for(self, bucket: int) -> torch.cuda.CUDAGraph:
-        graph = self._graphs.get(bucket)
-        if graph is not None:
-            return graph
+    def _graph(self) -> torch.cuda.CUDAGraph:
+        if self._captured is not None:
+            return self._captured
         torch = self.torch
         # Both the warm-up run and the capture itself execute the step, so the
         # decoder state has to be rolled back around them.
@@ -239,16 +220,15 @@ class W4A16ASRDecoder:
         stream = torch.cuda.Stream()
         stream.wait_stream(torch.cuda.current_stream())
         with torch.cuda.stream(stream):
-            self._step(bucket)
+            self._step()
         torch.cuda.current_stream().wait_stream(stream)
         torch.cuda.synchronize()
         self._restore(state)
         graph = torch.cuda.CUDAGraph()
         with torch.cuda.graph(graph):
-            self._step(bucket)
+            self._step()
         self._restore(state)
-        self._graphs[bucket] = graph
-        self.last_bucket = bucket
+        self._captured = graph
         return graph
 
     # -------------------------------------------------------------------- api
@@ -259,21 +239,21 @@ class W4A16ASRDecoder:
         )
         seq = cache_k.shape[0]
         for index in range(self.layers):
-            keys = cache_k[:, index].permute(1, 0, 2).unsqueeze(0)
-            values = cache_v[:, index].permute(1, 0, 2).unsqueeze(0)
-            if self.groups != 1:
-                keys = keys.repeat_interleave(self.groups, 1)
-                values = values.repeat_interleave(self.groups, 1)
-            self.cache_k[index][:, :, :seq] = keys
-            self.cache_v[index][:, :, :seq] = values
+            self.cache_k[index][:, :, :seq] = cache_k[:, index].permute(1, 0, 2).unsqueeze(0)
+            self.cache_v[index][:, :, :seq] = cache_v[:, index].permute(1, 0, 2).unsqueeze(0)
         self._pos.fill_(seq)
         self._token.copy_(logits[:, -1, :].argmax(-1))
         return logits, seq
 
     def generate(self, inputs_embeds: Tensor, max_new_tokens: int = 128, chunk: int = 8) -> list[int]:
+        _, _ = self.prefill_prompt(inputs_embeds)
+        return self.decode_loop(max_new_tokens, chunk)
+
+    def decode_loop(self, max_new_tokens: int = 128, chunk: int = 8) -> list[int]:
+        """Greedy decode from the current prefill state (no prompt re-encoding)."""
         torch = self.torch
         eos = (151643, 151645)
-        _, position = self.prefill_prompt(inputs_embeds)
+        position = int(self._pos.item())
         # The argmax of the prefill logits is the first generated token; the step
         # graph produces the one after it.
         self._produced[0].copy_(self._token[0])
@@ -283,9 +263,8 @@ class W4A16ASRDecoder:
         if tokens[0] in eos or max_new_tokens <= 1:
             return tokens[:max_new_tokens]
         while produced < max_new_tokens and position < self.max_cache - 1:
-            bucket = _bucket(position + 1)
-            graph = self._graph_for(bucket)
-            steps = min(chunk, bucket - position, max_new_tokens - produced, self.max_cache - 1 - position)
+            graph = self._graph()
+            steps = min(chunk, max_new_tokens - produced, self.max_cache - 1 - position)
             for _ in range(steps):
                 graph.replay()
             torch.cuda.synchronize()

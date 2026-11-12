@@ -17,8 +17,9 @@ namespace {
 
 constexpr int kWarps = 8;
 constexpr int kBlock = kWarps * 32;
-constexpr int kNibblesPerLane = 8;
-constexpr int kValuesPerWarpStep = 32 * kNibblesPerLane;  // 256
+constexpr int kNibblesPerLane = 32;
+constexpr int kValuesPerWarpStep = 32 * kNibblesPerLane;   // 1024
+constexpr int kLanesPerGroup = 64 / kNibblesPerLane;       // 2 lanes share a 64-value group
 
 __global__ void w4a16_gemv_kernel(const __half* __restrict__ x,
                                   const uint8_t* __restrict__ qweight,
@@ -37,8 +38,7 @@ __global__ void w4a16_gemv_kernel(const __half* __restrict__ x,
   const int groups = k >> 6;
   const int packed_row = k >> 1;
   const int steps = k / kValuesPerWarpStep;
-  const int lane_group = lane >> 3;   // 4 groups live in one 256-value step
-  const int group_scale = lane & 7;   // 8 lanes share each group
+  const int lane_group = lane / kLanesPerGroup;
 
   for (int n = blockIdx.x * kWarps + warp; n < rows; n += gridDim.x * kWarps) {
     const uint8_t* row = qweight + static_cast<long>(n) * packed_row;
@@ -46,22 +46,24 @@ __global__ void w4a16_gemv_kernel(const __half* __restrict__ x,
     float acc = 0.f;
     for (int step = 0; step < steps; ++step) {
       const int base = step * kValuesPerWarpStep + lane * kNibblesPerLane;
-      const uint32_t packed =
-          *reinterpret_cast<const uint32_t*>(row + (step * kValuesPerWarpStep + lane * kNibblesPerLane) / 2);
-      const uint4 xchunk = *reinterpret_cast<const uint4*>(&shared_x[base]);
-      const __half2* x2 = reinterpret_cast<const __half2*>(&xchunk);
+      const uint4 packed = __ldcs(reinterpret_cast<const uint4*>(row + (base >> 1)));
+      const __half2* xpairs = reinterpret_cast<const __half2*>(&shared_x[base]);
+      const uint32_t* words = reinterpret_cast<const uint32_t*>(&packed);
       float lo_acc = 0.f;
       float hi_acc = 0.f;
 #pragma unroll
-      for (int pair = 0; pair < 4; ++pair) {
-        const uint32_t byte = (packed >> (8 * pair)) & 0xFFu;
-        const int lo = ((byte & 0xF) ^ 8) - 8;
-        const int hi = (((byte >> 4) & 0xF) ^ 8) - 8;
-        const float2 xv = __half22float2(x2[pair]);
-        lo_acc += lo * xv.x;
-        hi_acc += hi * xv.y;
+      for (int word = 0; word < 4; ++word) {
+#pragma unroll
+        for (int pair = 0; pair < 4; ++pair) {
+          const uint32_t byte = (words[word] >> (8 * pair)) & 0xFFu;
+          const int lo = ((byte & 0xF) ^ 8) - 8;
+          const int hi = (((byte >> 4) & 0xF) ^ 8) - 8;
+          const float2 xv = __half22float2(xpairs[(word << 2) + pair]);
+          lo_acc += lo * xv.x;
+          hi_acc += hi * xv.y;
+        }
       }
-      const int scale_index = step * 4 + lane_group;
+      const int scale_index = step * (kValuesPerWarpStep / 64) + lane_group;
       acc += (lo_acc + hi_acc) * __half2float(row_scales[scale_index]);
     }
 #pragma unroll
@@ -72,7 +74,6 @@ __global__ void w4a16_gemv_kernel(const __half* __restrict__ x,
       const float total = residual == nullptr ? acc : acc + __half2float(residual[n]);
       y[n] = __float2half(total);
     }
-    (void)group_scale;
   }
 }
 

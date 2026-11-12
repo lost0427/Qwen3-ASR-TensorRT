@@ -75,6 +75,26 @@ __global__ void silu_mul_kernel(const __half* __restrict__ gate_up,
   out[index] = __float2half(silu * up);
 }
 
+// Appends one token to the grouped-query KV cache: the GQA expansion happens on
+// the fly, replacing a repeat_interleave plus two index_copy_ launches.
+__global__ void cache_write_kernel(__half* __restrict__ k_cache,
+                                   __half* __restrict__ v_cache,
+                                   const __half* __restrict__ k,
+                                   const __half* __restrict__ v,
+                                   const int64_t* __restrict__ position,
+                                   int total, int head_dim, int max_cache) {
+  const int index = blockIdx.x * blockDim.x + threadIdx.x;
+  if (index >= total) {
+    return;
+  }
+  const int head = index / head_dim;
+  const int depth = index % head_dim;
+  const long destination = static_cast<long>(head) * max_cache * head_dim
+                           + static_cast<long>(position[0]) * head_dim + depth;
+  k_cache[destination] = k[index];
+  v_cache[destination] = v[index];
+}
+
 }  // namespace
 
 void qk_norm_rope_launch(void* vectors, const void* weight, const void* cos, const void* sin,
@@ -91,4 +111,14 @@ void silu_mul_launch(const void* gate_up, void* out, int width, cudaStream_t str
   const int threads = 256;
   silu_mul_kernel<<<(width + threads - 1) / threads, threads, 0, stream>>>(
       reinterpret_cast<const __half*>(gate_up), reinterpret_cast<__half*>(out), width);
+}
+
+void cache_write_launch(void* k_cache, void* v_cache, const void* k, const void* v,
+                        const void* position, int total, int head_dim,
+                        int max_cache, cudaStream_t stream) {
+  const int threads = 256;
+  cache_write_kernel<<<(total + threads - 1) / threads, threads, 0, stream>>>(
+      reinterpret_cast<__half*>(k_cache), reinterpret_cast<__half*>(v_cache),
+      reinterpret_cast<const __half*>(k), reinterpret_cast<const __half*>(v),
+      reinterpret_cast<const int64_t*>(position), total, head_dim, max_cache);
 }

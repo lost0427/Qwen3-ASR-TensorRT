@@ -11,6 +11,13 @@ void w4a16_gemv_launch(const void* x, const void* qweight, const void* scales,
 void qk_norm_rope_launch(void* vectors, const void* weight, const void* cos, const void* sin,
                          int heads, int head_dim, float eps, cudaStream_t stream);
 void silu_mul_launch(const void* gate_up, void* out, int width, cudaStream_t stream);
+void cache_write_launch(void* k_cache, void* v_cache, const void* k, const void* v,
+                        const void* position, int total, int head_dim,
+                        int max_cache, cudaStream_t stream);
+void decode_attention_launch(const void* q, const void* k_cache, const void* v_cache,
+                             const void* position, void* out,
+                             int heads, int head_dim, int max_cache, int groups,
+                             cudaStream_t stream);
 
 namespace {
 
@@ -62,6 +69,27 @@ torch::Tensor silu_mul(torch::Tensor gate_up, int64_t width) {
   return out;
 }
 
+void cache_write(torch::Tensor k_cache, torch::Tensor v_cache, torch::Tensor k,
+                 torch::Tensor v, torch::Tensor position) {
+  const int heads = static_cast<int>(k_cache.size(1));
+  const int head_dim = static_cast<int>(k_cache.size(3));
+  const int max_cache = static_cast<int>(k_cache.size(2));
+  cache_write_launch(k_cache.data_ptr(), v_cache.data_ptr(), k.data_ptr(), v.data_ptr(),
+                     position.data_ptr(), heads * head_dim, head_dim, max_cache,
+                     c10::cuda::getCurrentCUDAStream().stream());
+}
+
+torch::Tensor decode_attention(torch::Tensor q, torch::Tensor k_cache, torch::Tensor v_cache,
+                               torch::Tensor position, torch::Tensor out, int64_t groups) {
+  const int heads = static_cast<int>(k_cache.size(1)) * static_cast<int>(groups);
+  const int head_dim = static_cast<int>(k_cache.size(3));
+  const int max_cache = static_cast<int>(k_cache.size(2));
+  decode_attention_launch(q.data_ptr(), k_cache.data_ptr(), v_cache.data_ptr(),
+                          position.data_ptr(), out.data_ptr(), heads, head_dim, max_cache,
+                          static_cast<int>(groups), c10::cuda::getCurrentCUDAStream().stream());
+  return out;
+}
+
 torch::Tensor pack_w4a16(torch::Tensor weight) {
   TORCH_CHECK(weight.is_cuda() && weight.scalar_type() == torch::kHalf, "weight must be fp16 CUDA");
   TORCH_CHECK(weight.dim() == 2, "weight must be [rows, K]");
@@ -94,6 +122,8 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("gemv_residual", &w4a16_gemv_residual, "W4A16 GEMV with residual add");
   m.def("qk_norm_rope", &qk_norm_rope, "fused q/k RMSNorm + RoPE (in place)");
   m.def("silu_mul", &silu_mul, "fused silu(gate) * up");
+  m.def("attention", &decode_attention, "single-query decode attention with device length");
+  m.def("cache_write", &cache_write, "append one token to the GQA KV cache");
   m.def("pack", &pack_w4a16, "pack fp16 weights to INT4");
   m.def("scale", &scale_w4a16, "per-group INT4 scales");
 }
