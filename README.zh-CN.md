@@ -1,6 +1,6 @@
 # Qwen3-ASR TensorRT
 
-面向 Windows、基于 TensorRT 音频编码器和 ExLlamaV3 EXL3 文本解码器的 Qwen3-ASR 0.6B 与 1.7B 推理项目。本仓库集成 encoder 和 decoder，并提供 Python 命令行与 HTTP API。
+面向 Windows、基于 TensorRT 音频编码器和两种文本解码器（ExLlamaV3 EXL3，或完全跑在 TensorRT 上的 INT4 weight-only W4A16 解码器）的 Qwen3-ASR 0.6B 与 1.7B 推理项目。本仓库集成 encoder 和 decoder，并提供 Python 命令行与 HTTP API。
 
 [English](README.md) | [简体中文](README.zh-CN.md) | [模型文件说明](model-cards/)
 
@@ -21,7 +21,7 @@ uv sync
 
 ## 模型
 
-项目支持 [`Qwen/Qwen3-ASR-0.6B-hf`](https://huggingface.co/Qwen/Qwen3-ASR-0.6B-hf) 和 [`Qwen/Qwen3-ASR-1.7B-hf`](https://huggingface.co/Qwen/Qwen3-ASR-1.7B-hf)，提供 BF16、FP16 TensorRT encoder、本地可选的 INT8 Q/DQ encoder 校准，以及 EXL3 3/4 bpw decoder。
+项目支持 [`Qwen/Qwen3-ASR-0.6B-hf`](https://huggingface.co/Qwen/Qwen3-ASR-0.6B-hf) 和 [`Qwen/Qwen3-ASR-1.7B-hf`](https://huggingface.co/Qwen/Qwen3-ASR-1.7B-hf)，提供 BF16、FP16 TensorRT encoder、本地可选的 INT8 Q/DQ encoder 校准、EXL3 3/4 bpw decoder，以及 TensorRT W4A16 decoder（INT4 权重、FP16 激活、AWQ 缩放）。
 
 已发布的模型文件：
 
@@ -83,6 +83,20 @@ uv run qwen3-asr --model Qwen/Qwen3-ASR-0.6B-hf quantize --bits 3 --cal-data .\a
 uv run qwen3-asr --model Qwen/Qwen3-ASR-0.6B-hf quantize --bits 4 --cal-data .\artifacts\train-clean-100-0.6b.safetensors --cal-rows 200 --output-dir artifacts/qwen3-asr-0.6b/decoder-exl3-4bpw-train-clean-100
 ```
 
+### W4A16 decoder
+
+另一条 decoder 路线把 4-bit 权重按 32 个权重一组存放，decode 步骤用自写的 INT4 kernel 完成，全程不反量化到 FP16。量化是激活感知的（AWQ 缩放 + 逐组裁剪），逐通道缩放被折叠进相邻的归一化和投影权重里，因此 prefill 与 decode 数值天然一致，运行时不需要额外缩放。
+
+```powershell
+# 用 train-clean-100 的 128 条音频做激活感知量化
+uv run python tools\quantize_awq.py --group 32 --utterances 128 ^
+  --manifest .\train-clean-100.manifest.jsonl --audio-root .\LibriSpeech ^
+  --output models\Qwen3-ASR-0.6B-hf-awq32 --report artifacts\awq32-report.json
+```
+
+得到的 checkpoint 是折叠过缩放的普通 FP16 模型，用 `transformers` 加载即可复现原模型；真正的 INT4 打包发生在构造 `W4A16ASRDecoder` 时。prefill 引擎建议直接用 FP16 构建 —— 量化 prefill 既不更快，还会损失精度。
+
+
 TensorRT engine 会根据目标 GPU 和本机 TensorRT 环境在本地构建。
 
 构建强制对齐器 encoder，并导出两种 decoder：
@@ -133,6 +147,7 @@ LibriSpeech `test-clean` 全量 2,620 条音频、53,120 个参考词。
 | --- | --- | ---: | ---: |
 | 0.6B | 官方 Transformers BF16 | 2.321% | 787.1 |
 | 0.6B | GGUF INT4 + Q4_K | 2.982% | 299.2 |
+| 0.6B | TensorRT fp16 + W4A16 AWQ (g32) | 2.397% | **81.6** |
 | 0.6B | TensorRT BF16 + EXL3 4 bpw | 2.423% | 96.7 |
 | 0.6B | TensorRT BF16 + EXL3 4 bpw，train-clean-100 | **2.342%** | 96.8 |
 | 1.7B | 官方 Transformers BF16 | 1.886% | 863.5 |

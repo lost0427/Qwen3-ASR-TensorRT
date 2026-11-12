@@ -1,6 +1,6 @@
 # Qwen3-ASR TensorRT
 
-Windows-tested inference for Qwen3-ASR 0.6B and 1.7B using a TensorRT audio encoder and an ExLlamaV3 EXL3 text decoder. This repository integrates both stages and provides a Python CLI and HTTP API.
+Windows-tested inference for Qwen3-ASR 0.6B and 1.7B using a TensorRT audio encoder and one of two text decoders: an ExLlamaV3 EXL3 decoder, or a fully TensorRT decoder with INT4 weight-only (W4A16) kernels. This repository integrates both stages and provides a Python CLI and HTTP API.
 
 [English](README.md) | [简体中文](README.zh-CN.md) | [Model files](model-cards/)
 
@@ -21,7 +21,7 @@ uv sync
 
 ## Models
 
-The project supports [`Qwen/Qwen3-ASR-0.6B-hf`](https://huggingface.co/Qwen/Qwen3-ASR-0.6B-hf) and [`Qwen/Qwen3-ASR-1.7B-hf`](https://huggingface.co/Qwen/Qwen3-ASR-1.7B-hf), with BF16 and FP16 TensorRT encoder builds, optional local INT8 Q/DQ encoder calibration, and EXL3 3/4 bpw decoder weights.
+The project supports [`Qwen/Qwen3-ASR-0.6B-hf`](https://huggingface.co/Qwen/Qwen3-ASR-0.6B-hf) and [`Qwen/Qwen3-ASR-1.7B-hf`](https://huggingface.co/Qwen/Qwen3-ASR-1.7B-hf), with BF16 and FP16 TensorRT encoder builds, optional local INT8 Q/DQ encoder calibration, EXL3 3/4 bpw decoder weights, and a TensorRT W4A16 decoder (INT4 weights, FP16 activations, AWQ-scaled).
 
 Published model files:
 
@@ -83,6 +83,20 @@ uv run qwen3-asr --model Qwen/Qwen3-ASR-0.6B-hf quantize --bits 3 --cal-data .\a
 uv run qwen3-asr --model Qwen/Qwen3-ASR-0.6B-hf quantize --bits 4 --cal-data .\artifacts\train-clean-100-0.6b.safetensors --cal-rows 200 --output-dir artifacts/qwen3-asr-0.6b/decoder-exl3-4bpw-train-clean-100
 ```
 
+### W4A16 decoder
+
+The alternative decoder keeps 4-bit weights in a 32-value group layout and runs the decode step with hand-written INT4 kernels, so nothing is dequantized into FP16. Quantization is activation-aware (AWQ scaling plus per-group clipping); the per-channel scales are folded into the adjacent normalization and projection weights, so prefill and decode stay numerically consistent without extra runtime scaling.
+
+```powershell
+# 128-utterance activation-aware quantisation from train-clean-100
+uv run python tools\quantize_awq.py --group 32 --utterances 128 ^
+  --manifest .\train-clean-100.manifest.jsonl --audio-root .\LibriSpeech ^
+  --output models\Qwen3-ASR-0.6B-hf-awq32 --report artifacts\awq32-report.json
+```
+
+The resulting checkpoint is a plain FP16 model with folded scales, so it loads with `transformers` and reproduces the base model. The INT4 packing happens when the decoder is constructed (`W4A16ASRDecoder`), and the prefill engine should be built as FP16 — quantising prefill costs accuracy and does not speed it up.
+
+
 TensorRT engines are generated locally for the target GPU and TensorRT environment.
 
 Build the forced aligner encoder and export both decoder variants:
@@ -138,6 +152,7 @@ LibriSpeech `test-clean`, all 2,620 utterances, 53,120 reference words.
 | --- | --- | ---: | ---: |
 | 0.6B | Official Transformers BF16 | 2.321% | 787.1 |
 | 0.6B | GGUF INT4 + Q4_K | 2.982% | 299.2 |
+| 0.6B | TensorRT fp16 + W4A16 AWQ (g32) | 2.397% | **81.6** |
 | 0.6B | TensorRT BF16 + EXL3 4 bpw | 2.423% | 96.7 |
 | 0.6B | TensorRT BF16 + EXL3 4 bpw, train-clean-100 | **2.342%** | 96.8 |
 | 1.7B | Official Transformers BF16 | 1.886% | 863.5 |
