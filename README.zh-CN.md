@@ -94,7 +94,9 @@ uv run python tools\quantize_awq.py --group 32 --utterances 128 ^
   --output models\Qwen3-ASR-0.6B-hf-awq32 --report artifacts\awq32-report.json
 ```
 
-得到的 checkpoint 是折叠过缩放的普通 FP16 模型，用 `transformers` 加载即可复现原模型；真正的 INT4 打包发生在构造 `W4A16ASRDecoder` 时。prefill 引擎建议直接用 FP16 构建 —— 量化 prefill 既不更快，还会损失精度。
+得到的 checkpoint 是折叠过缩放的普通 FP16 模型，用 `transformers` 加载即可复现原模型；真正的 INT4 打包发生在构造 `W4A16ASRDecoder` 时。0.6B 的 prefill 引擎建议用 FP16 构建 —— 量化 prefill 既不更快，还会损失精度。
+
+但在 8 GB 显存下，1.7B 的 FP16 prefill 引擎（3.3 GB）与 decoder 权重放在一起余量太小，TensorRT 的权重页会被驱动换出，反而拖慢 10 倍以上。这个尺寸请用 `quantize_encoder_int4` 构建 INT4 prefill 引擎；在 2,620 条语料上实测，它比 FP16 版本又快又不损失精度。
 
 
 TensorRT engine 会根据目标 GPU 和本机 TensorRT 环境在本地构建。
@@ -152,6 +154,7 @@ LibriSpeech `test-clean` 全量 2,620 条音频、53,120 个参考词。
 | 0.6B | TensorRT BF16 + EXL3 4 bpw，train-clean-100 | **2.342%** | 96.8 |
 | 1.7B | 官方 Transformers BF16 | 1.886% | 863.5 |
 | 1.7B | GGUF INT4 + Q4_K | 2.090% | 391.8 |
+| 1.7B | TensorRT INT4 + W4A16 AWQ (g32) | 2.003% | 223.6 |
 | 1.7B | TensorRT BF16 + EXL3 4 bpw | 1.939% | 204.4 |
 | 1.7B | TensorRT BF16 + EXL3 4 bpw，train-clean-100 | **1.911%** | 205.1 |
 

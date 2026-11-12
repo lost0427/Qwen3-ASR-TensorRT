@@ -172,6 +172,9 @@ class W4A16ASRDecoder:
         self._logits = torch.empty((1, self.vocab), dtype=torch.float16, device=cuda)
         self._attn_out = torch.empty((1, self.heads * self.head_dim), dtype=torch.float16, device=cuda)
         self._captured: torch.cuda.CUDAGraph | None = None
+        # Packing the projections allocates large FP32 temporaries; return them to
+        # the driver so the TensorRT prefill engine has room for its buffers.
+        torch.cuda.empty_cache()
 
     # ---------------------------------------------------------------- forward
 

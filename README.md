@@ -96,6 +96,8 @@ uv run python tools\quantize_awq.py --group 32 --utterances 128 ^
 
 The resulting checkpoint is a plain FP16 model with folded scales, so it loads with `transformers` and reproduces the base model. The INT4 packing happens when the decoder is constructed (`W4A16ASRDecoder`), and the prefill engine should be built as FP16 — quantising prefill costs accuracy and does not speed it up.
 
+On an 8 GB card the 1.7B FP16 prefill engine (3.3 GB) leaves too little headroom next to the decoder weights, and TensorRT's weight pages start thrashing. For that size build the prefill engine with `quantize_encoder_int4` instead; measured on 2,620 utterances it was both faster and no less accurate than the FP16 variant.
+
 
 TensorRT engines are generated locally for the target GPU and TensorRT environment.
 
@@ -157,6 +159,7 @@ LibriSpeech `test-clean`, all 2,620 utterances, 53,120 reference words.
 | 0.6B | TensorRT BF16 + EXL3 4 bpw, train-clean-100 | **2.342%** | 96.8 |
 | 1.7B | Official Transformers BF16 | 1.886% | 863.5 |
 | 1.7B | GGUF INT4 + Q4_K | 2.090% | 391.8 |
+| 1.7B | TensorRT INT4 + W4A16 AWQ (g32) | 2.003% | 223.6 |
 | 1.7B | TensorRT BF16 + EXL3 4 bpw | 1.939% | 204.4 |
 | 1.7B | TensorRT BF16 + EXL3 4 bpw, train-clean-100 | **1.911%** | 205.1 |
 
