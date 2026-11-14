@@ -108,6 +108,69 @@ uv run qwen3-asr --model .\models\Qwen3-ASR-1.7B-hf-awq32 transcribe .\audio.wav
 
 `--max-seq` 是 prefill 引擎能接受的最长 prompt，必须覆盖整条音频：音频 token 占满 prompt，约为每秒音频 13 个 token，默认的 512 覆盖约 39 秒。更长的 profile 会在运行时按序列长度线性占用显存；`--max-cache`（默认 2048）限制 KV cache；超过 profile 的 prompt 会直接报错，不会被截断。作为参照，Transformers checkpoint 支持 65,536 个位置。
 
+#### Decoder 参数
+
+`transcribe`、`benchmark`、`serve` 共用的运行期参数：
+
+| 参数 | 适用后端 | 默认值 | 作用 |
+| --- | --- | ---: | --- |
+| `--max-cache` | `tensorrt-w4a16` | 2048 | 为 prompt 和转写结果预留的 KV 槽位。两个尺寸每个槽位都是 112 KB（28 层 × 8 个 KV head × 128 × key/value 两份 × FP16），所以 2048 占 224 MB，8192 占 896 MB。prefill profile 足够大之后，音频长度上限由这里决定：2048 个槽位约合 157 秒。 |
+| `--group` | `tensorrt-w4a16` | 32 | checkpoint 的 INT4 打包分组。已发布的 AWQ 权重是 group 32；`64` 只适用于按该分组打包的 checkpoint。 |
+| `--decoder-engine` | `tensorrt-w4a16` | `artifacts/<model>/decoder-prefill/asr-prefill.fp16.engine` | prefill 引擎。输出 `logits` 的引擎和输出 norm 后 `hidden` 的引擎都能加载。 |
+| `--max-context-tokens` | `tensorrt-exllama` | 8192 | EXL3 路径的 KV 预算。 |
+| `--engine` | 所有 TensorRT 后端 | `artifacts/<model>/encoder-window.bf16.engine` | 音频编码器引擎。 |
+| `--max-new-tokens` | 全部 | 256 | decode 循环上限。 |
+
+`build-decoder-prefill` 的构建参数：
+
+| 参数 | 默认值 | 作用 |
+| --- | ---: | --- |
+| `--precision` | `fp16` | 引擎精度。 |
+| `--max-seq` | 512 | 引擎能接受的最长 prompt，约合 39 秒音频。更长的音频要调大。 |
+| `--opt-seq` | 256 | TensorRT 用于挑选 tactic 的序列长度，应接近实际负载的常见 prompt 长度。 |
+| `--workspace-gib` | 1 | 构建期 workspace。 |
+| `--keep-lm-head` | 关闭 | 把输出投影留在引擎内。关闭时改由运行时的 INT4 GEMV 完成，0.6B 省 296 MB、1.7B 省 593 MB。 |
+
+`qwen3-asr build --max-frames N` 决定 encoder 引擎能接受的最长 mel 输入，单位是 10 ms 一帧：默认 3600 即 36 秒。
+
+8 GB 卡上的实测配置：
+
+| 模型 | `--max-seq` | `--keep-lm-head` | `--max-cache` | prefill 引擎 | 结果 |
+| --- | ---: | --- | ---: | ---: | --- |
+| 0.6B | 512 | 是 | 2048 | 1142 MB | prefill 9.4 ms，中位 72.2 ms，WER 2.397% |
+| 1.7B | 512 | 否 | 2048 | 2694 MB | prefill 20.6 ms，中位 175.0 ms，WER 1.988% |
+| 1.7B，长音频 | 2048 | 否 | 4096 | 2694 MB | 145 秒文件一次转完，共 14.9 秒 |
+
+这个选择取决于显存，而不是模型大小：卡上还有余量就把投影留在引擎里，引擎加 decoder 权重之后余量太少才移出去。8 GB 卡上，1.7B 把投影放进引擎后只剩 1.24 GB，prefill 变成 222 ms；0.6B 的引擎只有 1.14 GB，放进去没有任何可测代价。`--max-cache` 只需要覆盖最长 prompt 加转写结果，每 token 112 KB。
+
+#### 更长的音频
+
+一次调用能吃多长的音频由三个上限决定，而在已发布的引擎上卡住的是 encoder：
+
+| 上限 | 参数 | 已发布值 | 音频长度 |
+| --- | --- | ---: | ---: |
+| encoder 输入 | `qwen3-asr build --max-frames` | 3600 帧 | 36 秒 |
+| decoder prefill | `build-decoder-prefill --max-seq` | 512 token | 39 秒 |
+| KV cache | `transcribe --max-cache` | 2048 token | 157 秒 |
+
+三者都是显存问题，不是算力问题。145 秒的文件需要 14,500 个 mel 帧和 1,903 个 token 的 prompt，因此在 decoder 之前就先被 encoder 挡住；用 `--max-frames 16000` 重建 encoder 得到的是 610 MB 的引擎，和 36 秒版本一样大，之后这个文件可以一次转完：总共 14.9 秒 —— 预处理 1.0 秒、encoder 0.17 秒、prefill 8.0 秒、解码 477 个 token 用 5.6 秒。这里 prefill 占大头，因为 attention 随 prompt 长度平方增长，而那时只剩约 0.5 GB 空闲显存。两个上限溢出时都会报错，并指出该改哪个参数、改成多少。
+
+decoder 这一侧的代价几乎不在引擎体积上 —— 512、1024、2048 构建出的 1.7B 引擎都是 2693.9 MB —— 但 TensorRT 按最大 profile 形状分配激活缓冲，所以进程加载时会多占显存。1.7B 在构造完成后：512 profile 剩 990 MB、1024 剩 912 MB、2048 剩 752 MB；同样 100 条上 prefill 分别为 22.7、24.8、24.3 ms，转写结果完全相同。
+
+| cache token 数 | 显存 | 音频长度 | 8 GB 卡上能否和 1.7B decoder 共存 |
+| --- | ---: | ---: | --- |
+| 2048 | 224 MB | 157 秒 | 可以，2048 profile 下剩 712 MB |
+| 4096 | 448 MB | 5.2 分钟 | 可以，需配 2048 profile |
+| 8192 | 896 MB | 10.5 分钟 | 不能 |
+| 16384 | 1.75 GB | 21 分钟 | 不能 |
+
+在显存允许的范围内，把参数调到足够大就够了。再往上需要两种设计：
+
+1. **按请求分配。** prompt 长度在解码开始前就是已知的（约每秒音频 13 个 token），因此 cache 可以按 `prompt token 数 + --max-new-tokens` 分配，而不是固定的预算，并针对这个长度重新捕获一次 CUDA Graph（捕获耗时是个位数毫秒，每种长度只需一次）。这样显存就随音频长度变化，和官方 `transformers` 的 cache 行为一致，也不需要 paged attention：attention kernel 本来就只算到当前位置，graph 只是记住了它捕获时的指针。
+2. **分块 prefill。** 现在的 prefill 图不接受 cache 输入，这才是 `--max-seq` 成为硬上限的原因。像 decode 图那样给它 `cache_k` / `cache_v` / `cache_len`（mask 让前缀全部可见、块内因果），profile 上限就消失了：prompt 按块送达，KV cache 逐块累积。算术与一次性 prefill 相同，所以 WER 的差异只来自 fp16 归约顺序和 TensorRT 针对不同序列长度挑选的 tactic，而不是模型本身。
+
+绝对上限和官方后端一样：`max_position_embeddings` 是 65,536，而 65,536 个 token 的 KV 约 7 GB，8 GB 卡放不下权重再加它。放不下的音频只能按静音切段分段转写，代价是失去单次推理保留的跨段上下文。
+
 音频编码器按参考实现的推理窗口（`n_window_infer`，104 个 token）做分段注意力，不再对整段音频做全局注意力。其输出在 1–5 个窗口上与 Transformers 参考实现的余弦相似度为 0.9995–0.9999；corpus WER 在各解码器上的变化为 ±0.04 个百分点，在本语料上相当于 20 个编辑。
 
 

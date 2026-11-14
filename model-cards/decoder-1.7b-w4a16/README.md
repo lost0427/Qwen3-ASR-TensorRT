@@ -48,7 +48,7 @@ This decoder was measured on 2026-11-14, the EXL3 rows on 2026-11-12, and the GG
 
 Build the prefill engine as FP16 **without** the output projection. With the projection inside, the engine is 3.29 GB and leaves 1.24 GB free on an 8 GB card next to the decoder weights; at that level TensorRT re-reads its weight pages every step and the full-corpus prefill median is 222.0 ms. Without the projection the engine is 2.69 GB and prefill is 20.6 ms, and the output projection moves to the INT4 `lm_head` GEMV that the decode loop already uses. Corpus WER is unchanged against the engine with the projection inside.
 
-`--max-seq` sets the longest prompt the engine accepts and has to cover the whole utterance at roughly 13 tokens per second of audio; 512 covers about 39 seconds.
+`--max-seq` sets the longest prompt the engine accepts and has to cover the whole utterance at roughly 13 tokens per second of audio; 512 covers about 39 seconds. The encoder engine has its own limit — 3600 mel frames, 36 seconds — raised with `qwen3-asr build --max-frames`. Both have to cover the audio before a long file transcodes in one pass; either overrun names the knob to rebuild with.
 
 ### Calibration
 
@@ -60,6 +60,16 @@ Calibration used 128 utterances from LibriSpeech `train-clean-100`. No `test-cle
 
 - NVIDIA GPU and CUDA, TensorRT 11.4
 - The [Qwen3-ASR-TensorRT repository](https://github.com/lost0427/Qwen3-ASR-TensorRT), which builds the engines and runs the decode kernels
+
+### Settings
+
+| Setting | Value | Notes |
+| --- | --- | --- |
+| `--backend` | `tensorrt-w4a16` | Selects this decoder in `transcribe`, `benchmark`, and `serve`. |
+| `--group` | 32 | Matches the packed weights. `64` only matches a checkpoint packed that way. |
+| `--max-cache` | 2048 | KV slots for prompt and transcript, 112 KB each, 224 MB total. Covers about 157 seconds of audio. |
+| `--max-seq` at build | 512 | Longest prompt accepted, about 39 seconds of audio. Raise it for longer utterances. |
+| output projection | outside the engine | The engine holds 2.69 GB instead of 3.29 GB, which leaves 1.79 GB free on an 8 GB card; prefill is 20.6 ms instead of 222 ms. Corpus WER is unchanged. |
 
 ## 中文
 
@@ -91,7 +101,7 @@ Calibration used 128 utterances from LibriSpeech `train-clean-100`. No `test-cle
 
 这个模型请用 FP16 构建 prefill 引擎，并且**不带**输出投影。把投影放进引擎时，引擎为 3.29 GB，在 8 GB 显存下与 decoder 权重放在一起只剩 1.24 GB 空闲；在这个水平上 TensorRT 每一步都要重读权重页，全量语料 prefill 中位数为 222.0 ms。移出投影后引擎为 2.69 GB，prefill 为 20.6 ms，输出投影改由 decode 循环本来就在用的 INT4 `lm_head` GEMV 完成。语料 WER 与把投影放在引擎里时一致。
 
-`--max-seq` 决定引擎能接受的最长 prompt，必须覆盖整条音频；按每秒音频约 13 个 token 计，512 约合 39 秒。
+`--max-seq` 决定引擎能接受的最长 prompt，必须覆盖整条音频；按每秒音频约 13 个 token 计，512 约合 39 秒。encoder 引擎另有 3600 个 mel 帧（36 秒）的上限，用 `qwen3-asr build --max-frames` 调整。两者都覆盖住音频，长文件才能一次转完；任一上限溢出都会指出该重建哪个参数。
 
 ### 标定
 
@@ -103,3 +113,13 @@ AWQ 意义上的激活感知量化：先对 AWQ 指数做网格搜索得到逐�
 
 - NVIDIA GPU 与 CUDA，TensorRT 11.4
 - [Qwen3-ASR-TensorRT 仓库](https://github.com/lost0427/Qwen3-ASR-TensorRT)，负责构建引擎并运行解码 kernel
+
+### 参数
+
+| 参数 | 取值 | 说明 |
+| --- | --- | --- |
+| `--backend` | `tensorrt-w4a16` | 在 `transcribe`、`benchmark`、`serve` 中选中本解码器。 |
+| `--group` | 32 | 与打包权重一致。`64` 只适用于按该分组打包的 checkpoint。 |
+| `--max-cache` | 2048 | prompt 与转写结果可用的 KV 槽位，每槽 112 KB，共 224 MB，约合 157 秒音频。 |
+| 构建时的 `--max-seq` | 512 | 能接受的最长 prompt，约合 39 秒音频；更长的音频要调大。 |
+| 输出投影 | 放在引擎外 | 引擎为 2.69 GB 而非 3.29 GB，在 8 GB 卡上留出 1.79 GB 空闲，prefill 为 20.6 ms 而非 222 ms，语料 WER 不变。 |

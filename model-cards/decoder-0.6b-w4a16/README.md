@@ -57,6 +57,16 @@ Calibration used 128 utterances from LibriSpeech `train-clean-100`. No `test-cle
 
 Windows is tested and supported. Linux should work with compatible CUDA, TensorRT, and PyTorch packages.
 
+### Settings
+
+| Setting | Value | Notes |
+| --- | --- | --- |
+| `--backend` | `tensorrt-w4a16` | Selects this decoder in `transcribe`, `benchmark`, and `serve`. |
+| `--group` | 32 | Matches the packed weights. `64` only matches a checkpoint packed that way. |
+| `--max-cache` | 2048 | KV slots for prompt and transcript, 112 KB each, 224 MB total. Covers about 157 seconds of audio. |
+| `--max-seq` at build | 512 | Longest prompt accepted, about 39 seconds of audio. Raise it for longer utterances; a longer prompt raises an error. |
+| output projection | inside the engine | Removing it left the 9.4 ms prefill unchanged, so the 296 MB it saves buys no speed. |
+
 ## 中文
 
 本仓库提供基于 [Qwen/Qwen3-ASR-0.6B-hf](https://huggingface.co/Qwen/Qwen3-ASR-0.6B-hf) 的 INT4 weight-only 文本解码器权重。使用时需配套兼容的 [TensorRT encoder](https://huggingface.co/Retrieve0/Qwen3-ASR-0.6B-TensorRT-Encoder)。[Qwen3-ASR-TensorRT 仓库](https://github.com/lost0427/Qwen3-ASR-TensorRT)集成了 encoder 和 decoder，可用于完整转写。
@@ -93,3 +103,13 @@ AWQ 意义上的激活感知量化：先对 AWQ 指数做网格搜索得到逐�
 - [Qwen3-ASR-TensorRT 仓库](https://github.com/lost0427/Qwen3-ASR-TensorRT)，负责构建引擎并运行解码 kernel
 - prefill 引擎请用 FP16 构建 —— 量化 prefill 既不更快，还会损失精度
 - 输出投影请留在 prefill 引擎内。移出后引擎从 1.14 GB 降到 0.85 GB，但 prefill 时间（9.4 ms）和 decode 时间都不变，`test-clean` 上反而多 4 个编辑
+
+### 参数
+
+| 参数 | 取值 | 说明 |
+| --- | --- | --- |
+| `--backend` | `tensorrt-w4a16` | 在 `transcribe`、`benchmark`、`serve` 中选中本解码器。 |
+| `--group` | 32 | 与打包权重一致。`64` 只适用于按该分组打包的 checkpoint。 |
+| `--max-cache` | 2048 | prompt 与转写结果可用的 KV 槽位，每槽 112 KB，共 224 MB，约合 157 秒音频。 |
+| 构建时的 `--max-seq` | 512 | 能接受的最长 prompt，约合 39 秒音频；更长的音频要调大，否则直接报错。 |
+| 输出投影 | 留在引擎内 | 移出后 9.4 ms 的 prefill 不变，省下的 296 MB 换不来速度。 |

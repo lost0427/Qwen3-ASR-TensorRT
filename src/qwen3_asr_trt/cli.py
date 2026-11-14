@@ -128,6 +128,12 @@ def main() -> None:
     build.add_argument("--output-dir", type=Path)
     build.add_argument("--workspace-gib", type=int, default=2)
     build.add_argument("--encoder-precision", choices=("bf16", "fp16", "int8", "int4"), default="bf16")
+    build.add_argument(
+        "--max-frames",
+        type=int,
+        default=3600,
+        help="longest mel input the encoder engine accepts; 100 frames per second (3600 = 36 s)",
+    )
 
     build_aligner = commands.add_parser("build-aligner")
     build_aligner.add_argument("--aligner-model", default="Qwen/Qwen3-ForcedAligner-0.6B")
@@ -201,14 +207,21 @@ def main() -> None:
         from .tensorrt_encoder import build_engine, export_encoder
 
         precision = args.encoder_precision
+        if args.max_frames < 100:
+            parser.error("--max-frames must be at least 100 (one second of audio)")
         onnx_path = args.output_dir / f"encoder-window.{precision}.onnx"
         engine_path = args.output_dir / f"encoder-window.{precision}.engine"
         if precision in ("int8", "int4"):
             if not onnx_path.is_file():
                 parser.error(f"{precision.upper()} encoder ONNX not found: {onnx_path}")
         else:
-            export_encoder(args.model, onnx_path, precision)
-        build_engine(onnx_path, engine_path, args.workspace_gib)
+            export_encoder(args.model, onnx_path, precision, max_frames=args.max_frames)
+        build_engine(
+            onnx_path,
+            engine_path,
+            args.workspace_gib,
+            frames_range=(100, min(800, args.max_frames), args.max_frames),
+        )
         export_text_model(args.model, args.output_dir / "decoder")
         return
 

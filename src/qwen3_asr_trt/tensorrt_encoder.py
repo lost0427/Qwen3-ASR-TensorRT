@@ -113,7 +113,12 @@ def _post_cnn_tokens(frame_count: int, frames_per_chunk: int = 100) -> int:
     return complete * 13 + remainder
 
 
-def export_encoder(model_id: str, output_path: Path, precision: str = "bf16") -> None:
+def export_encoder(
+    model_id: str,
+    output_path: Path,
+    precision: str = "bf16",
+    max_frames: int = 3600,
+) -> None:
     import torch
     from transformers import AutoModelForMultimodalLM
 
@@ -159,8 +164,8 @@ def export_encoder(model_id: str, output_path: Path, precision: str = "bf16") ->
         opset_version=20,
         dynamo=True,
         dynamic_shapes={
-            "input_features": {2: torch.export.Dim("frames", min=100, max=3600)},
-            "input_features_mask": {1: torch.export.Dim("masked", min=100, max=3600)},
+            "input_features": {2: torch.export.Dim("frames", min=100, max=max_frames)},
+            "input_features_mask": {1: torch.export.Dim("masked", min=100, max=max_frames)},
         },
     )
     del model
@@ -234,6 +239,8 @@ class TensorRTAudioEncoder:
         }[self.engine.get_tensor_dtype(self.output_names[0])]
         self.valid_dtype = torch.int64
         self.buffers: dict[tuple, "torch.Tensor"] = {}
+        profile = self.engine.get_tensor_profile_shape(self.input_names[0], 0)
+        self.max_frames = int(profile[2][-1]) if profile else 0
 
     def _buffer(self, key, shape, dtype):
         buffer = self.buffers.get(key)
@@ -248,6 +255,12 @@ class TensorRTAudioEncoder:
         chunk = self.frames_per_chunk
         padded = max(chunk, ((max(frame_count, 1) + chunk - 1) // chunk) * chunk)
         available = min(frame_count, int(input_features.shape[-1]))
+        if self.max_frames and padded > self.max_frames:
+            raise ValueError(
+                f"audio of {padded} frames ({padded / 100:.1f} s) exceeds this encoder's "
+                f"{self.max_frames}-frame profile ({self.max_frames / 100:.1f} s); rebuild it with "
+                f"`qwen3-asr build --max-frames {padded}`"
+            )
 
         features = self._buffer(("features", padded), (1, 128, padded), torch.float32)
         features.zero_()

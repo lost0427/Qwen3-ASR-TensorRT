@@ -76,10 +76,18 @@ class _TRTPrefill:
         # Engines exported with include_lm_head=False emit the final normed hidden
         # state and the runtime applies the INT4 output projection itself.
         self.emits_logits = "logits" in outputs
+        profile = engine.get_tensor_profile_shape("inputs_embeds", 0)
+        self.max_seq = int(profile[2][1]) if profile else 0
 
     def run(self, inputs_embeds: Tensor, layers: int, kv_heads: int, head_dim: int,
             vocab: int, hidden_size: int | None = None):
         seq = int(inputs_embeds.shape[1])
+        if self.max_seq and seq > self.max_seq:
+            raise ValueError(
+                f"prompt of {seq} tokens ({seq / 13:.1f} s of audio) exceeds this prefill engine's "
+                f"{self.max_seq}-token profile; rebuild it with "
+                f"`qwen3-asr build-decoder-prefill --max-seq {seq}`"
+            )
         embeds = inputs_embeds.contiguous()
         positions = torch.arange(seq, device="cuda").unsqueeze(0)
         head_name = "logits" if self.emits_logits else "hidden"
@@ -262,6 +270,12 @@ class W4A16ASRDecoder:
     # -------------------------------------------------------------------- api
 
     def prefill_prompt(self, inputs_embeds: Tensor) -> tuple[Tensor, int]:
+        prompt = int(inputs_embeds.shape[1])
+        if prompt >= self.max_cache:
+            raise ValueError(
+                f"prompt of {prompt} tokens does not fit the {self.max_cache}-token KV cache; "
+                "raise --max-cache"
+            )
         head, cache_k, cache_v = self.prefill.run(
             inputs_embeds, self.layers, self.kv_heads, self.head_dim, self.vocab,
             hidden_size=self.hidden,
@@ -304,4 +318,9 @@ class W4A16ASRDecoder:
             stop = next((i for i, value in enumerate(tokens) if value in eos), None)
             if stop is not None:
                 return tokens[:stop]
+        if produced < max_new_tokens:
+            raise ValueError(
+                f"transcript reached the {self.max_cache}-token KV cache after {produced} tokens; "
+                "raise --max-cache"
+            )
         return self._produced[:produced].tolist()
