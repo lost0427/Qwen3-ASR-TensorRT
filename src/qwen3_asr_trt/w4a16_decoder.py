@@ -114,20 +114,28 @@ class _TRTPrefill:
 
 
 class W4A16ASRDecoder:
-    """Greedy decoder: TensorRT prefill, packed-INT4 decode."""
+    """Greedy decoder: TensorRT prefill, packed-INT4 decode.
+
+    The KV cache is allocated per request: ``max_cache`` is a ceiling, the buffer
+    grows in ``growth_stride`` steps to cover the actual prompt plus transcript,
+    and the CUDA graph is re-captured once per size.
+    """
 
     def __init__(
         self,
         model_id: str,
         prefill_engine: Path,
-        max_cache: int = 2048,
+        max_cache: int = 4096,
         group: int = 64,
         keep_fp16: frozenset[str] = frozenset(),
+        growth_stride: int = 256,
     ):
         from transformers import AutoConfig, AutoModelForMultimodalLM
 
         self.torch = torch
         self.max_cache = max_cache
+        self.growth_stride = max(1, growth_stride)
+        self.capacity = 0
         self.group = group
         self.keep_fp16 = set(keep_fp16)
         config = AutoConfig.from_pretrained(str(model_id), local_files_only=True)
@@ -173,27 +181,64 @@ class W4A16ASRDecoder:
         inv_freq = 1.0 / (
             self.rope_theta ** (torch.arange(0, self.head_dim, 2, dtype=torch.float32) / self.head_dim)
         )
-        freqs = torch.outer(torch.arange(max_cache, dtype=torch.float32), inv_freq)
-        table = torch.cat([freqs, freqs], dim=-1)
-        self.cos_table = table.cos().to(cuda, torch.float16).contiguous()
-        self.sin_table = table.sin().to(cuda, torch.float16).contiguous()
-
-        size = (1, self.kv_heads, max_cache, self.head_dim)
-        self.cache_k = [torch.zeros(size, dtype=torch.float16, device=cuda) for _ in range(self.layers)]
-        self.cache_v = [torch.zeros(size, dtype=torch.float16, device=cuda) for _ in range(self.layers)]
+        # Kept on the host: the rope table is built there in FP32, which is the
+        # arithmetic the reference checkpoints and the earlier runs used.
+        self.inv_freq = inv_freq
+        self.cache_k: list = []
+        self.cache_v: list = []
 
         self.prefill = _TRTPrefill(prefill_engine)
 
         self._token = torch.zeros((1,), dtype=torch.long, device=cuda)
         self._pos = torch.zeros((1,), dtype=torch.long, device=cuda)
-        self._produced = torch.zeros((max_cache,), dtype=torch.long, device=cuda)
         self._generated = torch.zeros((1,), dtype=torch.long, device=cuda)
         self._logits = torch.empty((1, self.vocab), dtype=torch.float16, device=cuda)
         self._attn_out = torch.empty((1, self.heads * self.head_dim), dtype=torch.float16, device=cuda)
         self._captured: torch.cuda.CUDAGraph | None = None
+        self._allocate(min(self.growth_stride, max_cache))
         # Packing the projections allocates large FP32 temporaries; return them to
         # the driver so the TensorRT prefill engine has room for its buffers.
         torch.cuda.empty_cache()
+
+    # ------------------------------------------------------------- kv capacity
+
+    def _allocate(self, capacity: int) -> None:
+        """Resize the KV cache to ``capacity`` slots, keeping the written prefix."""
+        torch = self.torch
+        keep = min(int(self._pos.item()), self.capacity) if self.capacity else 0
+        previous_k, previous_v = self.cache_k, self.cache_v
+        size = (1, self.kv_heads, capacity, self.head_dim)
+        self.cache_k = [
+            torch.zeros(size, dtype=torch.float16, device="cuda") for _ in range(self.layers)
+        ]
+        self.cache_v = [
+            torch.zeros(size, dtype=torch.float16, device="cuda") for _ in range(self.layers)
+        ]
+        for index in range(self.layers):
+            if keep:
+                self.cache_k[index][:, :, :keep] = previous_k[index][:, :, :keep]
+                self.cache_v[index][:, :, :keep] = previous_v[index][:, :, :keep]
+
+        freqs = torch.outer(torch.arange(capacity, dtype=torch.float32), self.inv_freq)
+        table = torch.cat([freqs, freqs], dim=-1)
+        self.cos_table = table.cos().to("cuda", torch.float16).contiguous()
+        self.sin_table = table.sin().to("cuda", torch.float16).contiguous()
+        self._produced = torch.zeros((capacity,), dtype=torch.long, device="cuda")
+        self.capacity = capacity
+        # The graph holds the buffer pointers it was captured with.
+        self._captured = None
+
+    def ensure_capacity(self, tokens: int) -> None:
+        """Grow the cache to cover ``tokens`` slots, up to ``max_cache``."""
+        if tokens <= self.capacity:
+            return
+        if tokens > self.max_cache:
+            raise ValueError(
+                f"this request needs {tokens} KV slots but the decoder is capped at "
+                f"{self.max_cache}; raise --max-cache to at least {tokens}"
+            )
+        step = self.growth_stride
+        self._allocate(min(self.max_cache, ((tokens + step - 1) // step) * step))
 
     # ---------------------------------------------------------------- forward
 
@@ -269,13 +314,11 @@ class W4A16ASRDecoder:
 
     # -------------------------------------------------------------------- api
 
-    def prefill_prompt(self, inputs_embeds: Tensor) -> tuple[Tensor, int]:
+    def prefill_prompt(self, inputs_embeds: Tensor, reserve: int = 0) -> tuple[Tensor, int]:
         prompt = int(inputs_embeds.shape[1])
-        if prompt >= self.max_cache:
-            raise ValueError(
-                f"prompt of {prompt} tokens does not fit the {self.max_cache}-token KV cache; "
-                "raise --max-cache"
-            )
+        # A new request starts at position 0, so a grow here has no prefix to keep.
+        self._pos.fill_(0)
+        self.ensure_capacity(prompt + max(0, reserve))
         head, cache_k, cache_v = self.prefill.run(
             inputs_embeds, self.layers, self.kv_heads, self.head_dim, self.vocab,
             hidden_size=self.hidden,
@@ -298,6 +341,7 @@ class W4A16ASRDecoder:
         torch = self.torch
         eos = (151643, 151645)
         position = int(self._pos.item())
+        self.ensure_capacity(position + max_new_tokens)
         # The argmax of the prefill logits is the first generated token; the step
         # graph produces the one after it.
         self._produced[0].copy_(self._token[0])
@@ -306,9 +350,9 @@ class W4A16ASRDecoder:
         tokens = [int(self._token.item())]
         if tokens[0] in eos or max_new_tokens <= 1:
             return tokens[:max_new_tokens]
-        while produced < max_new_tokens and position < self.max_cache - 1:
+        while produced < max_new_tokens and position < self.capacity:
             graph = self._graph()
-            steps = min(chunk, max_new_tokens - produced, self.max_cache - 1 - position)
+            steps = min(chunk, max_new_tokens - produced, self.capacity - position)
             for _ in range(steps):
                 graph.replay()
             torch.cuda.synchronize()
@@ -320,7 +364,7 @@ class W4A16ASRDecoder:
                 return tokens[:stop]
         if produced < max_new_tokens:
             raise ValueError(
-                f"transcript reached the {self.max_cache}-token KV cache after {produced} tokens; "
-                "raise --max-cache"
+                f"transcript stopped at the {self.capacity}-token KV cache after {produced} tokens; "
+                f"raise --max-cache above {self.max_cache}"
             )
         return self._produced[:produced].tolist()

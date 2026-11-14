@@ -24,6 +24,10 @@ def _artifact_dir(model_id: str) -> Path:
 
 BACKENDS = ("bf16", "tensorrt-exllama", "tensorrt-w4a16")
 
+MAX_CACHE_HELP = (
+    "ceiling on the KV cache; the W4A16 decoder grows to fit each request"
+)
+
 
 def _wer(reference: str, hypothesis: str) -> float:
     normalize = lambda text: re.sub(r"\s+", " ", re.sub(r"[^A-Z0-9 ]", " ", text.upper())).strip().split()
@@ -73,7 +77,7 @@ def main() -> None:
     transcribe.add_argument("--decoder-dir", type=Path)
     transcribe.add_argument("--decoder-engine", type=Path)
     transcribe.add_argument("--engine", type=Path)
-    transcribe.add_argument("--max-cache", type=int, default=2048)
+    transcribe.add_argument("--max-cache", type=int, default=4096, help=MAX_CACHE_HELP)
     transcribe.add_argument("--max-context-tokens", type=int, default=8192)
     transcribe.add_argument("--group", type=int, choices=(32, 64), default=32)
 
@@ -99,7 +103,7 @@ def main() -> None:
     benchmark.add_argument("--decoder-dir", type=Path)
     benchmark.add_argument("--decoder-engine", type=Path)
     benchmark.add_argument("--engine", type=Path)
-    benchmark.add_argument("--max-cache", type=int, default=2048)
+    benchmark.add_argument("--max-cache", type=int, default=4096, help=MAX_CACHE_HELP)
     benchmark.add_argument("--max-context-tokens", type=int, default=8192)
     benchmark.add_argument("--group", type=int, choices=(32, 64), default=32)
     benchmark.add_argument("--warmups", type=int, default=2)
@@ -112,7 +116,7 @@ def main() -> None:
     api.add_argument("--decoder-dir", type=Path)
     api.add_argument("--decoder-engine", type=Path)
     api.add_argument("--engine", type=Path)
-    api.add_argument("--max-cache", type=int, default=2048)
+    api.add_argument("--max-cache", type=int, default=4096, help=MAX_CACHE_HELP)
     api.add_argument("--max-context-tokens", type=int, default=8192)
     api.add_argument("--group", type=int, choices=(32, 64), default=32)
 

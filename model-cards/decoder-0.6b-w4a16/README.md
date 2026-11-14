@@ -63,7 +63,7 @@ Windows is tested and supported. Linux should work with compatible CUDA, TensorR
 | --- | --- | --- |
 | `--backend` | `tensorrt-w4a16` | Selects this decoder in `transcribe`, `benchmark`, and `serve`. |
 | `--group` | 32 | Matches the packed weights. `64` only matches a checkpoint packed that way. |
-| `--max-cache` | 2048 | KV slots for prompt and transcript, 112 KB each, 224 MB total. Covers about 157 seconds of audio. |
+| `--max-cache` | 4096 | Ceiling on the KV cache. The decoder allocates prompt + `--max-new-tokens` in 256-slot steps, so short audio holds 768 slots (84 MB) and a 145 s file grows to 2560 (280 MB). 4096 slots is 448 MB and about 5.2 minutes of audio. |
 | `--max-seq` at build | 512 | Longest prompt accepted, about 39 seconds of audio. Raise it for longer utterances; a longer prompt raises an error. |
 | output projection | inside the engine | Removing it left the 9.4 ms prefill unchanged, so the 296 MB it saves buys no speed. |
 
@@ -110,6 +110,6 @@ AWQ 意义上的激活感知量化：先对 AWQ 指数做网格搜索得到逐�
 | --- | --- | --- |
 | `--backend` | `tensorrt-w4a16` | 在 `transcribe`、`benchmark`、`serve` 中选中本解码器。 |
 | `--group` | 32 | 与打包权重一致。`64` 只适用于按该分组打包的 checkpoint。 |
-| `--max-cache` | 2048 | prompt 与转写结果可用的 KV 槽位，每槽 112 KB，共 224 MB，约合 157 秒音频。 |
+| `--max-cache` | 4096 | KV cache 的上限。解码器按 prompt 加 `--max-new-tokens` 以 256 槽为步长分配，所以短音频只占 768 槽（84 MB），145 秒的文件扩到 2560 槽（280 MB）。4096 槽为 448 MB，约合 5.2 分钟音频。 |
 | 构建时的 `--max-seq` | 512 | 能接受的最长 prompt，约合 39 秒音频；更长的音频要调大，否则直接报错。 |
 | 输出投影 | 留在引擎内 | 移出后 9.4 ms 的 prefill 不变，省下的 296 MB 换不来速度。 |

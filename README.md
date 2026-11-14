@@ -114,7 +114,7 @@ Runtime flags, shared by `transcribe`, `benchmark` and `serve`:
 
 | Flag | Backend | Default | Effect |
 | --- | --- | ---: | --- |
-| `--max-cache` | `tensorrt-w4a16` | 2048 | KV slots reserved for the prompt and the transcript. Both sizes spend 112 KB per slot (28 layers × 8 KV heads × 128 × 2 values × FP16), so 2048 costs 224 MB and 8192 costs 896 MB. The cap on audio length comes from here once the prefill profile is large enough: 2048 slots is about 157 seconds. |
+| `--max-cache` | `tensorrt-w4a16` | 4096 | Ceiling on the KV cache, not a reservation. The decoder allocates what each request needs — prompt plus `--max-new-tokens`, rounded up to 256 slots — and grows in place when a longer request arrives, so a 30 s file uses 768 slots (84 MB) and a 145 s file grows to 2560 (280 MB). Both sizes spend 112 KB per slot (28 layers × 8 KV heads × 128 × 2 values × FP16), so 4096 slots is 448 MB and about 5.2 minutes of audio. |
 | `--group` | `tensorrt-w4a16` | 32 | INT4 packing group of the checkpoint. The published AWQ weights are group 32; `64` matches only a checkpoint packed that way. |
 | `--decoder-engine` | `tensorrt-w4a16` | `artifacts/<model>/decoder-prefill/asr-prefill.fp16.engine` | Prefill engine. Engines that emit `logits` and engines that emit the normed `hidden` both load. |
 | `--max-context-tokens` | `tensorrt-exllama` | 8192 | KV budget of the EXL3 path. |
@@ -141,7 +141,7 @@ Measured configurations on an 8 GB card:
 | 1.7B | 512 | no | 2048 | 2694 MB | 20.6 ms prefill, 175.0 ms median, 1.988% WER |
 | 1.7B, long audio | 2048 | no | 4096 | 2694 MB | 145 s file in one pass, 14.9 s total |
 
-The choice follows memory, not the model size: keep the projection inside the engine while the card still has room for it, and drop it when the engine plus the decoder weights leave too little. On 8 GB the 1.7B engine with the projection inside leaves 1.24 GB and prefill costs 222 ms, while the 1.14 GB 0.6B engine fits with no measurable cost. `--max-cache` only ever needed to cover the longest prompt plus the transcript, at 112 KB per token.
+The choice follows memory, not the model size: keep the projection inside the engine while the card still has room for it, and drop it when the engine plus the decoder weights leave too little. On 8 GB the 1.7B engine with the projection inside leaves 1.24 GB and prefill costs 222 ms, while the 1.14 GB 0.6B engine fits with no measurable cost.
 
 #### Longer audio
 
@@ -151,23 +151,25 @@ Three limits decide how much audio one call takes, and on the shipped engines th
 | --- | --- | ---: | ---: |
 | Encoder input | `qwen3-asr build --max-frames` | 3600 frames | 36 s |
 | Decoder prefill | `build-decoder-prefill --max-seq` | 512 tokens | 39 s |
-| KV cache | `transcribe --max-cache` | 2048 tokens | 157 s |
+| KV cache | `transcribe --max-cache` | ceiling, 4096 | 5.2 min |
 
 All three are memory, not compute. A 145 s file needs 14,500 mel frames and a 1,903-token prompt, so it fails on the encoder before the decoder sees it; rebuilding the encoder with `--max-frames 16000` gives a 610 MB engine, the same size as the 36 s one, and the file then transcribes in one pass: 14.9 s in total — 1.0 s preprocessing, 0.17 s encoder, 8.0 s prefill and 5.6 s decoding 477 tokens. Prefill is 12% of the runtime on short utterances and 54% here; attention grows with the square of the prompt, and about 0.5 GB of memory is free at that length on this card. Both overruns raise a message that names the knob and the value to rebuild with.
 
 The decoder side costs next to nothing in engine size — 512, 1024 and 2048 all produce a 2693.9 MB 1.7B engine — but TensorRT allocates activation buffers at the maximum profile shape, so the process reserves more at load time. On 1.7B the decoder leaves 990 MB free after construction with a 512 profile, 912 MB with 1024 and 752 MB with 2048; prefill measured 22.7, 24.8 and 24.3 ms on the same 100 utterances and produced identical transcripts.
 
-| Cache tokens | Memory | Audio | Fits next to the 1.7B decoder on 8 GB |
-| --- | ---: | ---: | --- |
-| 2048 | 224 MB | 157 s | yes, 712 MB free with a 2048 profile |
-| 4096 | 448 MB | 5.2 min | yes with a 2048 profile |
-| 8192 | 896 MB | 10.5 min | no |
-| 16384 | 1.75 GB | 21 min | no |
+The KV cache is sized per request, so the ceiling is not what the process holds:
 
-Raising the knobs covers audio that fits in the card. Beyond that there are two designs:
+| Slots allocated | Memory | Audio |
+| --- | ---: | ---: |
+| 768 | 84 MB | 59 s |
+| 2048 | 224 MB | 157 s |
+| 2560 | 280 MB | 197 s |
+| 4096 | 448 MB | 5.2 min |
+| 8192 | 896 MB | 10.5 min |
 
-1. **Per-request sizing.** The prompt length is known before decoding starts (about 13 tokens per second of audio), so the cache can be allocated as `prompt tokens + --max-new-tokens` instead of a fixed budget, and the CUDA graph re-captured for that length (a capture costs single-digit milliseconds, once per distinct size). Memory then follows the audio length the way the official `transformers` cache does, with no paged attention: the attention kernel already loops to the current position, and the graph only needs the pointer set it was captured with.
-2. **Chunked prefill.** The prefill graph currently takes no cache input, which is what fixes `--max-seq`. Giving it `cache_k`/`cache_v`/`cache_len` the way the decode graph already has them — with a mask that keeps the prefix visible and the chunk causal — removes the profile limit entirely; the prompt arrives in blocks of the profile size and the KV cache accumulates. The arithmetic is the same as one-shot prefill, so any WER change comes from fp16 reduction order and the tactics TensorRT picks per sequence length, not from the model.
+A 30 s file asks for `prompt + 256` slots, which rounds to 768; a 145 s file grows the buffer to 2560 in place, copying the written prefix and re-capturing the CUDA graph once for the new size. Requests beyond the ceiling raise a message with the value to set. Nothing is released after a long request, so a session settles at the largest capacity it needed.
+
+What remains is the prefill profile. **Chunked prefill** would remove it: the prefill graph currently takes no cache input, which is what fixes `--max-seq`. Giving it `cache_k`/`cache_v`/`cache_len` the way the decode graph already has them — with a mask that keeps the prefix visible and the chunk causal — lets the prompt arrive in blocks of the profile size while the cache accumulates. The arithmetic is the same as one-shot prefill, so any WER change would come from fp16 reduction order and the tactics TensorRT picks per sequence length, not from the model. It also caps the quadratic attention cost of a long prompt at the block size.
 
 The absolute ceiling is the same as the official backend's: `max_position_embeddings` is 65,536, and 65,536 tokens of KV is about 7 GB, more than an 8 GB card holds next to the weights. Audio that does not fit has to be segmented at silences and transcribed piecewise, which drops the cross-segment context that a single pass keeps.
 

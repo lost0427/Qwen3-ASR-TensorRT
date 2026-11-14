@@ -148,7 +148,7 @@ class TensorRTW4A16Transcriber:
         prefill_engine: Path,
         encoder_engine: Path,
         max_new_tokens: int = 256,
-        max_cache: int = 2048,
+        max_cache: int = 4096,
         group: int = 32,
     ) -> None:
         try:
@@ -197,7 +197,7 @@ class TensorRTW4A16Transcriber:
         )
 
         prefill_start = time.perf_counter()
-        self.decoder.prefill_prompt(hidden)
+        self.decoder.prefill_prompt(hidden, reserve=self.max_new_tokens)
         torch.cuda.synchronize()
         prefill_ms = (time.perf_counter() - prefill_start) * 1000
 
