@@ -11,6 +11,7 @@ import time
 
 from .runtime import Bf16ReferenceTranscriber
 from .runtime import TensorRTExLlamaTranscriber
+from .runtime import TensorRTW4A16Transcriber
 from .server import serve
 
 
@@ -19,6 +20,9 @@ def _artifact_dir(model_id: str) -> Path:
     if model_name.endswith("-hf"):
         model_name = model_name[:-3]
     return Path("artifacts") / model_name
+
+
+BACKENDS = ("bf16", "tensorrt-exllama", "tensorrt-w4a16")
 
 
 def _wer(reference: str, hypothesis: str) -> float:
@@ -65,9 +69,13 @@ def main() -> None:
     transcribe = commands.add_parser("transcribe")
     transcribe.add_argument("audio", type=Path)
     transcribe.add_argument("--language")
-    transcribe.add_argument("--backend", choices=("bf16", "tensorrt-exllama"), default="bf16")
+    transcribe.add_argument("--backend", choices=BACKENDS, default="bf16")
     transcribe.add_argument("--decoder-dir", type=Path)
+    transcribe.add_argument("--decoder-engine", type=Path)
     transcribe.add_argument("--engine", type=Path)
+    transcribe.add_argument("--max-cache", type=int, default=2048)
+    transcribe.add_argument("--max-context-tokens", type=int, default=8192)
+    transcribe.add_argument("--group", type=int, choices=(32, 64), default=32)
 
     align = commands.add_parser("align")
     align.add_argument("audio", type=Path)
@@ -87,18 +95,34 @@ def main() -> None:
     benchmark = commands.add_parser("benchmark")
     benchmark.add_argument("audio", type=Path)
     benchmark.add_argument("--language", default="English")
-    benchmark.add_argument("--backend", choices=("bf16", "tensorrt-exllama"), default="tensorrt-exllama")
+    benchmark.add_argument("--backend", choices=BACKENDS, default="tensorrt-exllama")
     benchmark.add_argument("--decoder-dir", type=Path)
+    benchmark.add_argument("--decoder-engine", type=Path)
     benchmark.add_argument("--engine", type=Path)
+    benchmark.add_argument("--max-cache", type=int, default=2048)
+    benchmark.add_argument("--max-context-tokens", type=int, default=8192)
+    benchmark.add_argument("--group", type=int, choices=(32, 64), default=32)
     benchmark.add_argument("--warmups", type=int, default=2)
     benchmark.add_argument("--repeats", type=int, default=10)
 
     api = commands.add_parser("serve")
     api.add_argument("--host", default="127.0.0.1")
     api.add_argument("--port", type=int, default=8000)
-    api.add_argument("--backend", choices=("bf16", "tensorrt-exllama"), default="bf16")
+    api.add_argument("--backend", choices=BACKENDS, default="bf16")
     api.add_argument("--decoder-dir", type=Path)
+    api.add_argument("--decoder-engine", type=Path)
     api.add_argument("--engine", type=Path)
+    api.add_argument("--max-cache", type=int, default=2048)
+    api.add_argument("--max-context-tokens", type=int, default=8192)
+    api.add_argument("--group", type=int, choices=(32, 64), default=32)
+
+    build_decoder = commands.add_parser("build-decoder-prefill")
+    build_decoder.add_argument("--output-dir", type=Path)
+    build_decoder.add_argument("--precision", choices=("fp16", "bf16"), default="fp16")
+    build_decoder.add_argument("--max-seq", type=int, default=512)
+    build_decoder.add_argument("--opt-seq", type=int, default=256)
+    build_decoder.add_argument("--workspace-gib", type=int, default=1)
+    build_decoder.add_argument("--keep-lm-head", action="store_true")
 
     build = commands.add_parser("build")
     build.add_argument("--output-dir", type=Path)
@@ -147,6 +171,8 @@ def main() -> None:
     elif args.command == "quantize-encoder-int4":
         args.input_onnx = args.input_onnx or artifact_dir / "encoder-window.fp16.onnx"
         args.output_onnx = args.output_onnx or artifact_dir / "encoder-window.int4.onnx"
+    elif args.command == "build-decoder-prefill":
+        args.output_dir = args.output_dir or artifact_dir / "decoder-prefill"
     elif args.command == "align":
         aligner_dir = _artifact_dir(args.aligner_model)
         args.decoder_dir = args.decoder_dir or aligner_dir / "decoder-exl3-4bpw"
@@ -161,6 +187,9 @@ def main() -> None:
         )
     else:
         args.decoder_dir = args.decoder_dir or artifact_dir / "decoder"
+        args.decoder_engine = args.decoder_engine or (
+            artifact_dir / "decoder-prefill" / "asr-prefill.fp16.engine"
+        )
         args.engine = args.engine or artifact_dir / "encoder-window.bf16.engine"
     logging.basicConfig(
         level=logging.INFO if args.verbose else logging.WARNING,
@@ -301,13 +330,65 @@ def main() -> None:
         print(json.dumps(report, ensure_ascii=False))
         return
 
-    if args.backend == "tensorrt-exllama":
+    if args.command == "build-decoder-prefill":
+        from transformers import AutoConfig
+
+        from .asr_decoder_trt import build_asr_decoder_engine, export_asr_decoder
+
+        config = AutoConfig.from_pretrained(args.model)
+        text = getattr(config, "text_config", config)
+        hidden = int(text.hidden_size)
+        started = time.perf_counter()
+        export_asr_decoder(
+            args.model,
+            args.output_dir,
+            "prefill",
+            precision=args.precision,
+            include_lm_head=args.keep_lm_head,
+        )
+        engine_path = args.output_dir / f"asr-prefill.{args.precision}.engine"
+        build_asr_decoder_engine(
+            args.output_dir / "asr-prefill.onnx",
+            engine_path,
+            {
+                "inputs_embeds": ((1, 1, hidden), (1, args.opt_seq, hidden), (1, args.max_seq, hidden)),
+                "position_ids": ((1, 1), (1, args.opt_seq), (1, args.max_seq)),
+            },
+            workspace_gib=args.workspace_gib,
+        )
+        print(
+            json.dumps(
+                {
+                    "engine": str(engine_path),
+                    "precision": args.precision,
+                    "maxSeq": args.max_seq,
+                    "lmHeadInEngine": args.keep_lm_head,
+                    "sizeMb": round(engine_path.stat().st_size / 2**20, 1),
+                    "elapsedSeconds": round(time.perf_counter() - started, 1),
+                },
+                ensure_ascii=False,
+            )
+        )
+        return
+
+    if args.backend == "tensorrt-w4a16":
+        load_start = time.perf_counter()
+        transcriber = TensorRTW4A16Transcriber(
+            args.model,
+            args.decoder_engine,
+            args.engine,
+            args.max_new_tokens,
+            max_cache=args.max_cache,
+            group=args.group,
+        )
+    elif args.backend == "tensorrt-exllama":
         load_start = time.perf_counter()
         transcriber = TensorRTExLlamaTranscriber(
             args.model,
             args.decoder_dir,
             args.engine,
             args.max_new_tokens,
+            max_context_tokens=args.max_context_tokens,
         )
     else:
         load_start = time.perf_counter()

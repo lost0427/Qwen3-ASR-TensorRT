@@ -68,12 +68,23 @@ class _TRTPrefill:
             raise RuntimeError(f"could not load {engine_path}")
         self.engine = engine
         self.context = engine.create_execution_context()
+        outputs = {
+            engine.get_tensor_name(index)
+            for index in range(engine.num_io_tensors)
+            if engine.get_tensor_mode(engine.get_tensor_name(index)) == trt.TensorIOMode.OUTPUT
+        }
+        # Engines exported with include_lm_head=False emit the final normed hidden
+        # state and the runtime applies the INT4 output projection itself.
+        self.emits_logits = "logits" in outputs
 
-    def run(self, inputs_embeds: Tensor, layers: int, kv_heads: int, head_dim: int, vocab: int):
+    def run(self, inputs_embeds: Tensor, layers: int, kv_heads: int, head_dim: int,
+            vocab: int, hidden_size: int | None = None):
         seq = int(inputs_embeds.shape[1])
         embeds = inputs_embeds.contiguous()
         positions = torch.arange(seq, device="cuda").unsqueeze(0)
-        logits = torch.empty((1, 1, vocab), dtype=torch.float16, device="cuda")
+        head_name = "logits" if self.emits_logits else "hidden"
+        head_width = vocab if self.emits_logits else hidden_size
+        head = torch.empty((1, 1, head_width), dtype=torch.float16, device="cuda")
         cache_k = torch.empty((seq, layers, kv_heads, head_dim), dtype=torch.float16, device="cuda")
         cache_v = torch.empty_like(cache_k)
         self.context.set_input_shape("inputs_embeds", (1, seq, embeds.shape[-1]))
@@ -81,7 +92,7 @@ class _TRTPrefill:
         tensors = {
             "inputs_embeds": embeds,
             "position_ids": positions,
-            "logits": logits,
+            head_name: head,
             "cache_k": cache_k,
             "cache_v": cache_v,
         }
@@ -91,7 +102,7 @@ class _TRTPrefill:
         stream = torch.cuda.current_stream()
         if not self.context.execute_async_v3(stream.cuda_stream):
             raise RuntimeError("prefill execution failed")
-        return logits, cache_k, cache_v
+        return head, cache_k, cache_v
 
 
 class W4A16ASRDecoder:
@@ -251,9 +262,11 @@ class W4A16ASRDecoder:
     # -------------------------------------------------------------------- api
 
     def prefill_prompt(self, inputs_embeds: Tensor) -> tuple[Tensor, int]:
-        logits, cache_k, cache_v = self.prefill.run(
-            inputs_embeds, self.layers, self.kv_heads, self.head_dim, self.vocab
+        head, cache_k, cache_v = self.prefill.run(
+            inputs_embeds, self.layers, self.kv_heads, self.head_dim, self.vocab,
+            hidden_size=self.hidden,
         )
+        logits = head if self.prefill.emits_logits else self.lm_head(head)
         seq = cache_k.shape[0]
         for index in range(self.layers):
             self.cache_k[index][:, :, :seq] = cache_k[:, index].permute(1, 0, 2).unsqueeze(0)

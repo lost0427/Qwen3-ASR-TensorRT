@@ -17,7 +17,7 @@ from __future__ import annotations
 from pathlib import Path
 
 
-def _make_graph(language_model, lm_head, mode: str):
+def _make_graph(language_model, lm_head, mode: str, include_lm_head: bool = True):
     import torch
     from torch import nn
     from torch.nn import functional as F
@@ -28,6 +28,7 @@ def _make_graph(language_model, lm_head, mode: str):
             super().__init__()
             self.language_model = language_model
             self.lm_head = lm_head
+            self.include_lm_head = include_lm_head
             self.layers = language_model.layers
             self.norm = language_model.norm
             self.rotary = language_model.rotary_emb
@@ -67,7 +68,8 @@ def _make_graph(language_model, lm_head, mode: str):
             return hidden, k, v
 
         def _logits(self, hidden):
-            return self.lm_head(self.norm(hidden[:, -1:, :]))
+            normed = self.norm(hidden[:, -1:, :])
+            return self.lm_head(normed) if self.include_lm_head else normed
 
         def _run(self, hidden, cos, sin, mask, cache_k, cache_v):
             new_k, new_v = [], []
@@ -120,7 +122,13 @@ def _make_graph(language_model, lm_head, mode: str):
     return (PrefillGraph() if mode == "prefill" else DecodeGraph()).eval()
 
 
-def export_asr_decoder(model_id: str, output_dir: Path, mode: str, precision: str = "fp16") -> None:
+def export_asr_decoder(
+    model_id: str,
+    output_dir: Path,
+    mode: str,
+    precision: str = "fp16",
+    include_lm_head: bool = True,
+) -> None:
     import torch
     from transformers import AutoModelForMultimodalLM
 
@@ -130,7 +138,7 @@ def export_asr_decoder(model_id: str, output_dir: Path, mode: str, precision: st
     )
     model.eval()
     language_model = model.model.language_model
-    graph = _make_graph(language_model, model.lm_head, mode).to("cuda").to(dtype)
+    graph = _make_graph(language_model, model.lm_head, mode, include_lm_head).to("cuda").to(dtype)
     config = language_model.config
     hidden = config.hidden_size
     layers = len(language_model.layers)
@@ -146,7 +154,7 @@ def export_asr_decoder(model_id: str, output_dir: Path, mode: str, precision: st
             (embeds, positions),
             str(output_dir / "asr-prefill.onnx"),
             input_names=["inputs_embeds", "position_ids"],
-            output_names=["logits", "cache_k", "cache_v"],
+            output_names=["logits" if include_lm_head else "hidden", "cache_k", "cache_v"],
             opset_version=20,
             dynamo=True,
             dynamic_shapes={

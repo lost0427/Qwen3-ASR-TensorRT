@@ -53,6 +53,7 @@ Calibration used 128 utterances from LibriSpeech `train-clean-100`. No `test-cle
 - NVIDIA GPU and CUDA, TensorRT 11.4
 - The [Qwen3-ASR-TensorRT repository](https://github.com/lost0427/Qwen3-ASR-TensorRT), which builds the engines and runs the decode kernels
 - Build the prefill engine as FP16 — quantising prefill costs accuracy and does not make it faster
+- Keep the output projection inside the prefill engine. Leaving it out shrinks the engine from 1.14 GB to 0.85 GB but changes neither the prefill time (9.4 ms) nor the decode time, and it measured 4 edits worse on `test-clean`
 
 Windows is tested and supported. Linux should work with compatible CUDA, TensorRT, and PyTorch packages.
 
@@ -91,3 +92,4 @@ AWQ 意义上的激活感知量化：先对 AWQ 指数做网格搜索得到逐�
 - NVIDIA GPU 与 CUDA，TensorRT 11.4
 - [Qwen3-ASR-TensorRT 仓库](https://github.com/lost0427/Qwen3-ASR-TensorRT)，负责构建引擎并运行解码 kernel
 - prefill 引擎请用 FP16 构建 —— 量化 prefill 既不更快，还会损失精度
+- 输出投影请留在 prefill 引擎内。移出后引擎从 1.14 GB 降到 0.85 GB，但 prefill 时间（9.4 ms）和 decode 时间都不变，`test-clean` 上反而多 4 个编辑

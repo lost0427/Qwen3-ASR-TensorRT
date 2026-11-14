@@ -137,3 +137,86 @@ class TensorRTExLlamaTranscriber:
             "totalMs": total_ms,
         }
         return output.strip()
+
+
+class TensorRTW4A16Transcriber:
+    """TensorRT encoder plus the packed-INT4 (W4A16) decoder."""
+
+    def __init__(
+        self,
+        model_id: str,
+        prefill_engine: Path,
+        encoder_engine: Path,
+        max_new_tokens: int = 256,
+        max_cache: int = 2048,
+        group: int = 32,
+    ) -> None:
+        try:
+            import torch
+            from transformers import AutoProcessor
+        except ImportError as exc:
+            raise RuntimeError("Install the project environment with `uv sync`") from exc
+
+        from .tensorrt_encoder import TensorRTAudioEncoder
+        from .w4a16_decoder import W4A16ASRDecoder
+
+        if not torch.cuda.is_available():
+            raise RuntimeError("W4A16 inference requires a CUDA GPU")
+
+        self.torch = torch
+        self.processor = AutoProcessor.from_pretrained(str(model_id))
+        self.encoder = TensorRTAudioEncoder(Path(encoder_engine))
+        self.decoder = W4A16ASRDecoder(
+            str(model_id), Path(prefill_engine), max_cache=max_cache, group=group
+        )
+        self.embed = self.decoder.embed
+        self.audio_token_id = 151676
+        self.max_new_tokens = max_new_tokens
+        self.last_timings: dict[str, float] = {}
+
+    def transcribe(self, audio_path: Path, language: str | None = None) -> str:
+        torch = self.torch
+        total_start = time.perf_counter()
+        inputs = self.processor.apply_transcription_request(
+            audio=str(audio_path), language=language
+        )
+        torch.cuda.synchronize()
+        preprocessing_ms = (time.perf_counter() - total_start) * 1000
+
+        encoder_start = time.perf_counter()
+        features = inputs["input_features"]
+        mask = torch.ones((1, features.shape[-1]), dtype=torch.int32)
+        embeddings = self.encoder.encode(features, mask).to(torch.float16)
+        torch.cuda.synchronize()
+        encoder_ms = (time.perf_counter() - encoder_start) * 1000
+
+        ids = inputs["input_ids"].to("cuda")
+        hidden = self.embed[ids].masked_scatter(
+            (ids == self.audio_token_id).unsqueeze(-1),
+            embeddings.reshape(-1, embeddings.shape[-1]),
+        )
+
+        prefill_start = time.perf_counter()
+        self.decoder.prefill_prompt(hidden)
+        torch.cuda.synchronize()
+        prefill_ms = (time.perf_counter() - prefill_start) * 1000
+
+        decode_start = time.perf_counter()
+        tokens = self.decoder.decode_loop(self.max_new_tokens)
+        torch.cuda.synchronize()
+        decode_ms = (time.perf_counter() - decode_start) * 1000
+
+        text = self.processor.tokenizer.decode(tokens, skip_special_tokens=True)
+        total_ms = (time.perf_counter() - total_start) * 1000
+        self.last_timings = {
+            "preprocessingMs": preprocessing_ms,
+            "encoderMs": encoder_ms,
+            "decoderMs": prefill_ms + decode_ms,
+            "decoderPrefillMs": prefill_ms,
+            "decoderGenerationMs": decode_ms,
+            "promptTokens": int(hidden.shape[1]),
+            "decodeTokens": len(tokens),
+            "otherMs": max(0.0, total_ms - preprocessing_ms - encoder_ms - prefill_ms - decode_ms),
+            "totalMs": total_ms,
+        }
+        return text.strip()

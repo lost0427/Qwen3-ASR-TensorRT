@@ -37,14 +37,18 @@ All numbers are the 2,620 LibriSpeech `test-clean` utterances, greedy decoding, 
 | Official `qwen-asr` Transformers BF16 | 1.886% | 863.5 ms |
 | EXL3 4 bpw, train-clean-100 | 1.944% | 208.1 ms |
 | EXL3 4 bpw, legacy | 1.984% | 208.8 ms |
-| **W4A16 AWQ, group 32** | **2.003%** | **192.7 ms** |
+| **W4A16 AWQ, group 32** | **1.988%** | **175.0 ms** |
 | GGUF INT4 + Q4_K | 2.090% | 391.8 ms |
 
-This decoder runs 1.08× faster than both EXL3 4 bpw decoders, 2.03× faster than GGUF, and 4.48× faster than the official backend. Its corpus WER is 0.019 points above the legacy EXL3 decoder and 0.059 above the calibrated one; a 20-edit difference on this corpus corresponds to about 0.02 points.
+This decoder runs 1.19× faster than both EXL3 4 bpw decoders, 2.24× faster than GGUF, and 4.93× faster than the official backend. Its corpus WER is 0.004 points above the legacy EXL3 decoder and 0.044 above the calibrated one; a 20-edit difference on this corpus corresponds to about 0.02 points.
+
+This decoder was measured on 2026-11-14, the EXL3 rows on 2026-11-12, and the GGUF and official rows on 2026-11-11. Re-running the legacy EXL3 decoder on 2026-11-14 measured 211.5 ms against its 208.8 ms from 2026-11-12.
 
 ### Prefill
 
-Build the prefill engine as **INT4** for this model. On an 8 GB card the FP16 prefill engine (3.3 GB) leaves too little headroom next to the decoder weights, and TensorRT's weight pages get paged out — prefill degraded from ~24 ms to ~650 ms and was not less accurate, so the INT4 engine is the right choice here.
+Build the prefill engine as FP16 **without** the output projection. With the projection inside, the engine is 3.29 GB and leaves 1.24 GB free on an 8 GB card next to the decoder weights; at that level TensorRT re-reads its weight pages every step and the full-corpus prefill median is 222.0 ms. Without the projection the engine is 2.69 GB and prefill is 20.6 ms, and the output projection moves to the INT4 `lm_head` GEMV that the decode loop already uses. Corpus WER is unchanged against the engine with the projection inside.
+
+`--max-seq` sets the longest prompt the engine accepts and has to cover the whole utterance at roughly 13 tokens per second of audio; 512 covers about 39 seconds.
 
 ### Calibration
 
@@ -76,14 +80,18 @@ Calibration used 128 utterances from LibriSpeech `train-clean-100`. No `test-cle
 | 官方 `qwen-asr` Transformers BF16 | 1.886% | 863.5 ms |
 | EXL3 4 bpw，train-clean-100 校准 | 1.944% | 208.1 ms |
 | EXL3 4 bpw，旧版 | 1.984% | 208.8 ms |
-| **W4A16 AWQ，group 32** | **2.003%** | **192.7 ms** |
+| **W4A16 AWQ，group 32** | **1.988%** | **175.0 ms** |
 | GGUF INT4 + Q4_K | 2.090% | 391.8 ms |
 
-本解码器比两个 EXL3 4 bpw 解码器都快 1.08 倍、比 GGUF 快 2.03 倍、比官方后端快 4.48 倍。语料 WER 比旧版 EXL3 高 0.019 个百分点、比校准版高 0.059 个百分点；本语料上 20 个编辑的差异约对应 0.02 个百分点。
+本解码器比两个 EXL3 4 bpw 解码器都快 1.19 倍、比 GGUF 快 2.24 倍、比官方后端快 4.93 倍。语料 WER 比旧版 EXL3 高 0.004 个百分点、比校准版高 0.044 个百分点；本语料上 20 个编辑的差异约对应 0.02 个百分点。
+
+本解码器于 2026-11-14 测量，EXL3 各行于 2026-11-12，GGUF 与官方后端子集于 2026-11-11。把旧版 EXL3 解码器在 2026-11-14 重测，中位数为 211.5 ms，对应的 2026-11-12 值为 208.8 ms。
 
 ### prefill
 
-这个模型请用 **INT4** 构建 prefill 引擎。在 8 GB 显存下，FP16 prefill 引擎（3.3 GB）与 decoder 权重放在一起余量太小，TensorRT 的权重页会被换出 —— prefill 从约 24 ms 劣化到约 650 ms，且并不更准，所以这里选 INT4 引擎。
+这个模型请用 FP16 构建 prefill 引擎，并且**不带**输出投影。把投影放进引擎时，引擎为 3.29 GB，在 8 GB 显存下与 decoder 权重放在一起只剩 1.24 GB 空闲；在这个水平上 TensorRT 每一步都要重读权重页，全量语料 prefill 中位数为 222.0 ms。移出投影后引擎为 2.69 GB，prefill 为 20.6 ms，输出投影改由 decode 循环本来就在用的 INT4 `lm_head` GEMV 完成。语料 WER 与把投影放在引擎里时一致。
+
+`--max-seq` 决定引擎能接受的最长 prompt，必须覆盖整条音频；按每秒音频约 13 个 token 计，512 约合 39 秒。
 
 ### 标定
 

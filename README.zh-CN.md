@@ -94,9 +94,19 @@ uv run python tools\quantize_awq.py --group 32 --utterances 128 ^
   --output models\Qwen3-ASR-0.6B-hf-awq32 --report artifacts\awq32-report.json
 ```
 
-得到的 checkpoint 是折叠过缩放的普通 FP16 模型，用 `transformers` 加载即可复现原模型；真正的 INT4 打包发生在构造 `W4A16ASRDecoder` 时。0.6B 的 prefill 引擎用 FP16 构建：在 2,620 条语料上，它比 INT4 prefill 的 WER 好 0.089 个百分点、快 1.7 ms。
+得到的 checkpoint 是折叠过缩放的普通 FP16 模型，用 `transformers` 加载即可复现原模型；真正的 INT4 打包发生在构造 `W4A16ASRDecoder` 时。0.6B 的 prefill 引擎用 FP16 构建、并把输出投影留在引擎里：在 2,620 条语料上，它比 INT4 prefill 的 WER 好 0.089 个百分点、快 1.7 ms。把这个 0.6B 引擎的投影移出去，prefill 时间仍是 9.4 ms，但多 4 个编辑。
 
-在 8 GB 显存下，1.7B 的 FP16 prefill 引擎（3.3 GB）与 decoder 权重放在一起余量太小，TensorRT 的权重页会被驱动换出。这个尺寸用 `quantize_encoder_int4` 构建 INT4 prefill 引擎；在 2,620 条语料上，它的 WER 差 0.015 个百分点、快 5 ms。
+1.7B 则相反：把输出投影放进引擎时，FP16 prefill 引擎为 3.29 GB，在 8 GB 显存下与 decoder 权重放在一起只剩 1.24 GB 空闲；在这个水平上 TensorRT 每一步都要重读权重页，全量语料 prefill 中位数为 222 ms。用 `build-decoder-prefill`（不加 `--keep-lm-head`）把投影移出引擎后，引擎为 2.69 GB，prefill 为 20.6 ms，输出投影改由 decode 循环本来就在用的 INT4 `lm_head` GEMV 完成。在 2,620 条语料上 WER 为 1.9876%，与把投影放在引擎里时完全一致，比 INT4 prefill 引擎好 0.015 个百分点。
+
+```powershell
+uv run qwen3-asr --model .\models\Qwen3-ASR-1.7B-hf-awq32 build-decoder-prefill --max-seq 512 --opt-seq 256 `
+  --output-dir artifacts\qwen3-asr-1.7b\decoder-prefill
+uv run qwen3-asr --model .\models\Qwen3-ASR-1.7B-hf-awq32 transcribe .\audio.wav --backend tensorrt-w4a16 `
+  --engine artifacts\qwen3-asr-1.7b\encoder-window.bf16.engine `
+  --decoder-engine artifacts\qwen3-asr-1.7b\decoder-prefill\asr-prefill.fp16.engine
+```
+
+`--max-seq` 是 prefill 引擎能接受的最长 prompt，必须覆盖整条音频：音频 token 占满 prompt，约为每秒音频 13 个 token，默认的 512 覆盖约 39 秒。更长的 profile 会在运行时按序列长度线性占用显存；`--max-cache`（默认 2048）限制 KV cache；超过 profile 的 prompt 会直接报错，不会被截断。作为参照，Transformers checkpoint 支持 65,536 个位置。
 
 音频编码器按参考实现的推理窗口（`n_window_infer`，104 个 token）做分段注意力，不再对整段音频做全局注意力。其输出在 1–5 个窗口上与 Transformers 参考实现的余弦相似度为 0.9995–0.9999；corpus WER 在各解码器上的变化为 ±0.04 个百分点，在本语料上相当于 20 个编辑。
 
@@ -145,7 +155,7 @@ API 默认只监听本机地址，支持 WAV、MP3、FLAC、OGG、M4A 和 AAC �
 
 ## 基准测试
 
-LibriSpeech `test-clean` 全量 2,620 条音频、53,120 个参考词。延迟为全量中位数；30–200 条的子集因前若干条要付进程与频率爬升的代价，会高 20–40%。Corpus WER 是确定性的、可跨 session 复现；延迟只在同一 session 内可比。EXL3 4 bpw 与 W4A16 各行于 2026-11-12 使用窗口化编码器同批测量；3 bpw 与 GGUF 各行来自 2026-11-11 的运行。
+LibriSpeech `test-clean` 全量 2,620 条音频、53,120 个参考词。延迟为全量中位数；30–200 条的子集因前若干条要付进程与频率爬升的代价，会高 20–40%。Corpus WER 是确定性的、可跨 session 复现；延迟只在同一 session 内可比。EXL3 4 bpw 各行与 0.6B 的 W4A16 行于 2026-11-12 使用窗口化编码器测量，1.7B 的 W4A16 行于 2026-11-14 测量；把 2026-11-12 的一项在后者重测，中位数从 208.8 ms 变为 211.5 ms。3 bpw 与 GGUF 各行来自 2026-11-11 的运行。
 
 | 模型 | 后端 | Corpus WER | 中位延迟 ms |
 | --- | --- | ---: | ---: |
@@ -156,7 +166,7 @@ LibriSpeech `test-clean` 全量 2,620 条音频、53,120 个参考词。延迟�
 | 0.6B | TensorRT BF16 + EXL3 4 bpw，train-clean-100 | **2.362%** | 99.8 |
 | 1.7B | 官方 Transformers BF16 | 1.886% | 863.5 |
 | 1.7B | GGUF INT4 + Q4_K | 2.090% | 391.8 |
-| 1.7B | TensorRT INT4 + W4A16 AWQ (g32) | 2.003% | **192.7** |
+| 1.7B | TensorRT fp16 prefill + W4A16 AWQ (g32) | 1.988% | **175.0** |
 | 1.7B | TensorRT BF16 + EXL3 4 bpw | 1.984% | 208.8 |
 | 1.7B | TensorRT BF16 + EXL3 4 bpw，train-clean-100 | **1.944%** | 208.1 |
 
