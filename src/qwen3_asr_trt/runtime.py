@@ -2,6 +2,8 @@ from pathlib import Path
 import time
 from typing import Protocol
 
+from .audio import load_audio
+
 
 class Transcriber(Protocol):
     def transcribe(self, audio_path: Path, language: str | None = None) -> str: ...
@@ -31,7 +33,7 @@ class Bf16ReferenceTranscriber:
 
     def transcribe(self, audio_path: Path, language: str | None = None) -> str:
         inputs = self.processor.apply_transcription_request(
-            audio=str(audio_path), language=language
+            audio=load_audio(audio_path), language=language
         ).to(self.model.device, self.model.dtype)
         output_ids = self.model.generate(**inputs, max_new_tokens=self.max_new_tokens)
         generated_ids = output_ids[:, inputs["input_ids"].shape[1] :]
@@ -54,7 +56,9 @@ class TensorRTExLlamaTranscriber:
             from exllamav3 import Cache, Config, Generator, MMEmbedding, Model, Tokenizer
             from transformers import AutoProcessor
         except ImportError as exc:
-            raise RuntimeError("Install the project environment with `uv sync`") from exc
+            raise RuntimeError(
+                "Install the project environment with `uv sync --extra exllama`"
+            ) from exc
 
         if not torch.cuda.is_available():
             raise RuntimeError("TensorRT and ExLlamaV3 inference requires a CUDA GPU")
@@ -81,7 +85,7 @@ class TensorRTExLlamaTranscriber:
         torch = self.torch
         total_start = time.perf_counter()
         inputs = self.processor.apply_transcription_request(
-            audio=str(audio_path), language=language
+            audio=load_audio(audio_path), language=language
         )
         torch.cuda.synchronize()
         preprocessing_ms = (time.perf_counter() - total_start) * 1000
@@ -178,7 +182,7 @@ class TensorRTW4A16Transcriber:
         torch = self.torch
         total_start = time.perf_counter()
         inputs = self.processor.apply_transcription_request(
-            audio=str(audio_path), language=language
+            audio=load_audio(audio_path), language=language
         )
         torch.cuda.synchronize()
         preprocessing_ms = (time.perf_counter() - total_start) * 1000

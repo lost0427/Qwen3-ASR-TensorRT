@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from .audio import load_audio
+
 
 _AUDIO_SUFFIXES = {".aac", ".flac", ".m4a", ".mp3", ".ogg", ".wav"}
 
@@ -73,7 +75,7 @@ def quantize_encoder(
     processor = AutoProcessor.from_pretrained(model_id)
     samples = []
     for audio_path in files:
-        inputs = processor.apply_transcription_request(audio=str(audio_path), language=language)
+        inputs = processor.apply_transcription_request(audio=load_audio(audio_path), language=language)
         features = inputs["input_features"].detach().to(device="cpu", dtype=torch.float32).numpy()
         mask = inputs["input_features_mask"].detach().to(device="cpu").numpy()
         frame_count = int(mask.sum())

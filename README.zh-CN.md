@@ -9,15 +9,24 @@
 - Windows 10/11、NVIDIA GPU、CUDA 12.8
 - Python 3.10–3.13 和 `uv`
 - TensorRT 11.4.0.106
-- 兼容的 PyTorch 和 ExLlamaV3 版本
+- 兼容的 PyTorch 版本；ExLlamaV3 由 `exllama` extra 提供
 
-Linux 环境在 CUDA、TensorRT、PyTorch 和 ExLlamaV3 软件包兼容时也可运行。
+Linux 环境在 CUDA、TensorRT、PyTorch 软件包兼容时也可运行。
 
-安装项目依赖：
+安装 TensorRT 后端所需依赖：
 
 ```powershell
 uv sync
 ```
+
+需要 EXL3 后端或 encoder 量化时再加 extra：
+
+```powershell
+uv sync --extra exllama          # --backend tensorrt-exllama
+uv sync --extra quantization     # quantize-encoder（INT8 Q/DQ）
+```
+
+默认安装只带推理所需的包：`librosa` 及其 `numba`/`scipy`/`scikit-learn` 依赖链被 `soundfile` + `soxr` 取代，ExLlamaV3（连同 `triton-windows`）改为可选。
 
 ## 模型
 
@@ -259,11 +268,11 @@ API 默认只监听本机地址，支持 WAV、MP3、FLAC、OGG、M4A 和 AAC �
 
 | 后端 | 0.6B | 1.7B |
 | --- | ---: | ---: |
-| `tensorrt-w4a16`，FP16 checkpoint | 14.8 | 19.1 |
-| `tensorrt-w4a16`，预打包 INT4 decoder | 14.0 | 16.7 |
-| `tensorrt-exllama` | 12.9 | 14.0 |
+| `tensorrt-w4a16`，FP16 checkpoint | 10.6 | 14.7 |
+| `tensorrt-w4a16`，预打包 INT4 decoder | 9.8 | 12.4 |
+| `tensorrt-exllama` | 9.0 | 10.1 |
 
-其中 11.9 GB 是两者共用的 Python 环境：torch 4.2 GB、`tensorrt_libs` 3.2 GB、CUDA 运行库 3.2 GB，以及只有量化和 ONNX 路径才用到的 `onnxruntime`、`triton`、`scipy` 共 0.6 GB。
+TensorRT 后端的环境为 7.7 GB：torch 4.2 GB、`tensorrt_libs` 3.2 GB，其余 transformers、tokenizers、numpy、onnx、soxr 合计约 0.3 GB。torch 的 cu128 wheel 自带 CUDA 运行库，因此不再安装 `nvidia-*` 包。`--extra exllama` 再加 0.36 GB，主要是 `triton-windows`。
 
 | 产物 | 0.6B | 1.7B |
 | --- | ---: | ---: |

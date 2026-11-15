@@ -6,7 +6,7 @@ requires-python = ">=3.10.11,<3.14"
 dependencies = [
     "accelerate>=1.12.0",
     "huggingface-hub>=0.36.0",
-    "librosa>=0.11.0",
+    "soxr>=1.0.0",
     "onnx>=1.19.0",
     "onnxscript>=0.5.0",
     "soundfile>=0.13.0",
@@ -14,6 +14,12 @@ dependencies = [
     "transformers>=5.13.0,<6",
     "torch==2.10.0",
     "tensorrt-cu12==11.4.0.106",
+]
+
+[project.optional-dependencies]
+packaging = ["pyinstaller>=6.14"]
+quantization = ["onnxruntime-gpu[cuda,cudnn]>=1.23.2,<1.26"]
+exllama = [
     "exllamav3 @ https://github.com/turboderp-org/exllamav3/releases/download/v1.6.6/exllamav3-1.6.6%2Bcu128.torch2.10.0-cp313-cp313-win_amd64.whl ; sys_platform == 'win32' and python_version == '3.13'",
     "exllamav3 @ https://github.com/turboderp-org/exllamav3/releases/download/v1.6.6/exllamav3-1.6.6%2Bcu128.torch2.10.0-cp313-cp313-linux_x86_64.whl ; sys_platform == 'linux' and python_version == '3.13'",
     "exllamav3 @ https://github.com/turboderp-org/exllamav3/releases/download/v1.6.6/exllamav3-1.6.6%2Bcu128.torch2.10.0-cp312-cp312-win_amd64.whl ; sys_platform == 'win32' and python_version == '3.12'",
@@ -23,10 +29,6 @@ dependencies = [
     "exllamav3 @ https://github.com/turboderp-org/exllamav3/releases/download/v1.6.6/exllamav3-1.6.6%2Bcu128.torch2.10.0-cp310-cp310-win_amd64.whl ; sys_platform == 'win32' and python_version == '3.10'",
     "exllamav3 @ https://github.com/turboderp-org/exllamav3/releases/download/v1.6.6/exllamav3-1.6.6%2Bcu128.torch2.10.0-cp310-cp310-linux_x86_64.whl ; sys_platform == 'linux' and python_version == '3.10'",
 ]
-
-[project.optional-dependencies]
-packaging = ["pyinstaller>=6.14"]
-quantization = ["onnxruntime-gpu[cuda,cudnn]>=1.23.2,<1.26"]
 
 [project.scripts]
 qwen3-asr = "qwen3_asr_trt.cli:main"

@@ -9,15 +9,24 @@ Windows-tested inference for Qwen3-ASR 0.6B and 1.7B using a TensorRT audio enco
 - Windows 10/11, NVIDIA GPU, and CUDA 12.8
 - Python 3.10–3.13 and `uv`
 - TensorRT 11.4.0.106
-- A compatible PyTorch and ExLlamaV3 build
+- A compatible PyTorch build; ExLlamaV3 comes with the `exllama` extra
 
-Linux should work when compatible CUDA, TensorRT, PyTorch, and ExLlamaV3 packages are available.
+Linux should work when compatible CUDA, TensorRT, and PyTorch packages are available.
 
-Install the project dependencies:
+Install for the TensorRT backends:
 
 ```powershell
 uv sync
 ```
+
+Add the EXL3 backend or the encoder quantization path as extras:
+
+```powershell
+uv sync --extra exllama          # --backend tensorrt-exllama
+uv sync --extra quantization     # quantize-encoder (INT8 Q/DQ)
+```
+
+The default install carries what inference needs and nothing else: `librosa` and its `numba`/`scipy`/`scikit-learn` chain are replaced by `soundfile` plus `soxr`, and ExLlamaV3 (with `triton-windows`) is optional.
 
 ## Models
 
@@ -266,11 +275,11 @@ Inference needs the Python environment plus one encoder engine and one decoder a
 
 | Backend | 0.6B | 1.7B |
 | --- | ---: | ---: |
-| `tensorrt-w4a16`, FP16 checkpoint | 14.8 | 19.1 |
-| `tensorrt-w4a16`, packed INT4 decoder | 14.0 | 16.7 |
-| `tensorrt-exllama` | 12.9 | 14.0 |
+| `tensorrt-w4a16`, FP16 checkpoint | 10.6 | 14.7 |
+| `tensorrt-w4a16`, packed INT4 decoder | 9.8 | 12.4 |
+| `tensorrt-exllama` | 9.0 | 10.1 |
 
-The environment is 11.9 GB of every figure: torch 4.2 GB, `tensorrt_libs` 3.2 GB, the CUDA runtime libraries 3.2 GB, and 0.6 GB of `onnxruntime`, `triton` and `scipy` that only the quantization and ONNX paths use.
+The environment is 7.7 GB for the TensorRT backends: torch 4.2 GB, `tensorrt_libs` 3.2 GB, and 0.3 GB of transformers, tokenizers, numpy, onnx and soxr. Torch's cu128 wheel carries its own CUDA libraries, so no `nvidia-*` packages are installed. `--extra exllama` adds 0.36 GB, mostly `triton-windows`.
 
 | Artifact | 0.6B | 1.7B |
 | --- | ---: | ---: |

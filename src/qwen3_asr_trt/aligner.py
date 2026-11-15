@@ -6,6 +6,8 @@ from pathlib import Path
 
 import numpy as np
 
+from .audio import load_audio
+
 
 def _is_kept_char(ch: str) -> bool:
     if ch == "'":
@@ -143,17 +145,10 @@ def _prepare_aligner_inputs(
     processor, processor_text, encoder, audio_path, text: str, language: str
 ):
     """Shared preprocess + TensorRT audio encoding for both aligner backends."""
-    import soundfile as sf
     import torch
 
     started = time.perf_counter()
-    pcm, sample_rate = sf.read(str(audio_path), dtype="float32", always_2d=False)
-    if pcm.ndim > 1:
-        pcm = pcm.mean(axis=1)
-    if sample_rate != 16000:
-        import librosa
-
-        pcm = librosa.resample(pcm, orig_sr=sample_rate, target_sr=16000)
+    pcm = load_audio(audio_path)
     words, prompt_text = processor_text.encode_timestamp(text, language)
     inputs = processor(
         text=[prompt_text],
