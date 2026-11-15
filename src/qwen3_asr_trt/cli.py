@@ -127,6 +127,11 @@ def main() -> None:
     build_decoder.add_argument("--opt-seq", type=int, default=256)
     build_decoder.add_argument("--workspace-gib", type=int, default=1)
     build_decoder.add_argument("--keep-lm-head", action="store_true")
+    build_decoder.add_argument(
+        "--onnx",
+        type=Path,
+        help="build from an existing ONNX instead of exporting from the checkpoint",
+    )
 
     pack_decoder_parser = commands.add_parser("pack-decoder")
     pack_decoder_parser.add_argument("--output-dir", type=Path)
@@ -371,16 +376,19 @@ def main() -> None:
         text = getattr(config, "text_config", config)
         hidden = int(text.hidden_size)
         started = time.perf_counter()
-        export_asr_decoder(
-            args.model,
-            args.output_dir,
-            "prefill",
-            precision=args.precision,
-            include_lm_head=args.keep_lm_head,
-        )
+        onnx_path = args.onnx
+        if onnx_path is None:
+            export_asr_decoder(
+                args.model,
+                args.output_dir,
+                "prefill",
+                precision=args.precision,
+                include_lm_head=args.keep_lm_head,
+            )
+            onnx_path = args.output_dir / "asr-prefill.onnx"
         engine_path = args.output_dir / f"asr-prefill.{args.precision}.engine"
         build_asr_decoder_engine(
-            args.output_dir / "asr-prefill.onnx",
+            onnx_path,
             engine_path,
             {
                 "inputs_embeds": ((1, 1, hidden), (1, args.opt_seq, hidden), (1, args.max_seq, hidden)),

@@ -140,6 +140,14 @@ uv run qwen3-asr --model artifacts\qwen3-asr-1.7b\decoder-int4 transcribe .\audi
   --decoder-engine artifacts\qwen3-asr-1.7b\decoder-prefill\asr-prefill.fp16.engine
 ```
 
+The published packed repositories also carry `asr-prefill.onnx`, so the prefill engine can be built without
+downloading the FP16 checkpoint:
+
+```powershell
+uv run qwen3-asr --model Retrieve0/Qwen3-ASR-1.7B-W4A16-Decoder-INT4 build-decoder-prefill `
+  --onnx <packed-dir>\asr-prefill.onnx --max-seq 512 --opt-seq 256
+```
+
 The packed directory is 628 MB for 0.6B and 1528 MB for 1.7B, against 1492 MB and 3887 MB for the FP16 checkpoints. The nibbles come from the same kernel that packs at load time, so a packed checkpoint reproduces the FP16 path bit for bit. `--group` is fixed in the file; asking the loader for another value raises an error. The published repositories work directly as `--model Retrieve0/Qwen3-ASR-1.7B-W4A16-Decoder-INT4`.
 
 #### Decoder parameters

@@ -32,6 +32,9 @@ This is the same quantisation the runtime performs when it packs the [FP16 check
 
 ### What it is not
 
+`asr-prefill.onnx` (with its `.onnx.data`) is included so the prefill engine can be built without the FP16
+checkpoint: `qwen3-asr --model <this repo> build-decoder-prefill --onnx asr-prefill.onnx`.
+
 Not an AutoAWQ, GPTQ, or ExLlamaV3 checkpoint, and not loadable by `transformers`, vLLM, or llama.cpp as a quantized model. Only this project's runtime understands the layout. There are no FP16 weights here, so it cannot be re-quantised with a different group size — download the FP16 checkpoint for that.
 
 ### Accuracy and speed
@@ -75,6 +78,9 @@ The loader reads `packed_config.json` and needs no FP16 weights. `--group` is fi
 这份权重就是运行时加载 [FP16 checkpoint](https://huggingface.co/Retrieve0/Qwen3-ASR-0.6B-W4A16-Decoder) 时打包出来的结果，由同一个 kernel 生成，因此转写结果逐位一致。唯一的区别是磁盘占用：0.61 GB 对 1.47 GB。
 
 ### 不是什么
+
+仓库内含 `asr-prefill.onnx`（及其 `.onnx.data`），因此在没有 FP16 checkpoint 的情况下也能构建 prefill 引擎：
+`qwen3-asr --model <本仓库> build-decoder-prefill --onnx asr-prefill.onnx`。
 
 不是 AutoAWQ、GPTQ 或 ExLlamaV3 格式，`transformers`、vLLM、llama.cpp 都无法把它当作量化模型加载，只有本项目的运行时能读这种布局。这里没有 FP16 权重，因此无法改用其它分组重新量化 —— 需要那样做请下载 FP16 checkpoint。
 

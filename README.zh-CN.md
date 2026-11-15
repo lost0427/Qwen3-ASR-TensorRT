@@ -138,6 +138,13 @@ uv run qwen3-asr --model artifacts\qwen3-asr-1.7b\decoder-int4 transcribe .\audi
   --decoder-engine artifacts\qwen3-asr-1.7b\decoder-prefill\asr-prefill.fp16.engine
 ```
 
+已发布的预打包仓库里还带有 `asr-prefill.onnx`，因此不必下载 FP16 checkpoint 也能构建 prefill 引擎：
+
+```powershell
+uv run qwen3-asr --model Retrieve0/Qwen3-ASR-1.7B-W4A16-Decoder-INT4 build-decoder-prefill `
+  --onnx <packed-dir>\asr-prefill.onnx --max-seq 512 --opt-seq 256
+```
+
 预打包目录 0.6B 为 628 MB、1.7B 为 1528 MB，对应的 FP16 checkpoint 是 1492 MB 和 3887 MB。半字节由加载时打包所用的同一个 kernel 生成，因此预打包版本与 FP16 路径逐位一致。`--group` 被固化在文件里，向加载器传入其它值会报错。已发布的仓库可以直接写成 `--model Retrieve0/Qwen3-ASR-1.7B-W4A16-Decoder-INT4`。
 
 #### Decoder 参数
