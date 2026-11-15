@@ -29,10 +29,12 @@ uv sync
 - [EXL3 decoder：legacy 3 bpw 和 4 bpw](https://huggingface.co/Retrieve0/Qwen3-ASR-1.7B-EXL3-Decoder)
 - [1.7B EXL3 3 bpw：使用 train-clean-100 重新校准](https://huggingface.co/Retrieve0/Qwen3-ASR-1.7B-EXL3-Decoder/tree/main/decoder-exl3-3bpw-train-clean-100)（同一 decoder 仓库中的独立目录）
 - [1.7B EXL3 4 bpw：使用 train-clean-100 重新校准](https://huggingface.co/Retrieve0/Qwen3-ASR-1.7B-EXL3-Decoder/tree/main/decoder-exl3-4bpw-train-clean-100)（同一 decoder 仓库中的独立目录）
+- [1.7B W4A16 decoder，AWQ group 32](https://huggingface.co/Retrieve0/Qwen3-ASR-1.7B-W4A16-Decoder)
 - [0.6B TensorRT encoder：BF16 和 FP16 ONNX](https://huggingface.co/Retrieve0/Qwen3-ASR-0.6B-TensorRT-Encoder)
 - [0.6B EXL3 decoder：legacy 3 bpw 和 4 bpw](https://huggingface.co/Retrieve0/Qwen3-ASR-0.6B-EXL3-Decoder)
 - [0.6B EXL3 3 bpw：使用 train-clean-100 重新校准](https://huggingface.co/Retrieve0/Qwen3-ASR-0.6B-EXL3-Decoder/tree/main/decoder-exl3-3bpw-train-clean-100)（同一 decoder 仓库中的独立目录）
 - [0.6B EXL3 4 bpw：使用 train-clean-100 重新校准](https://huggingface.co/Retrieve0/Qwen3-ASR-0.6B-EXL3-Decoder/tree/main/decoder-exl3-4bpw-train-clean-100)（同一 decoder 仓库中的独立目录）
+- [0.6B W4A16 decoder，AWQ group 32](https://huggingface.co/Retrieve0/Qwen3-ASR-0.6B-W4A16-Decoder)
 - [Qwen3-ForcedAligner 0.6B TensorRT encoder](https://huggingface.co/Retrieve0/Qwen3-ForcedAligner-0.6B-TensorRT-Encoder)
 - [Qwen3-ForcedAligner 0.6B EXL3 4 bpw decoder](https://huggingface.co/Retrieve0/Qwen3-ForcedAligner-0.6B-EXL3-Decoder)
 
@@ -50,6 +52,12 @@ uv run qwen3-asr --model Qwen/Qwen3-ASR-1.7B-hf build
 
 ```powershell
 uv run qwen3-asr --model Qwen/Qwen3-ASR-1.7B-hf build --encoder-precision fp16
+```
+
+这两条命令给 encoder 引擎的输入上限都是 36 秒。更长的音频用 `--max-frames` 调整，100 个 mel 帧对应 1 秒：
+
+```powershell
+uv run qwen3-asr --model Qwen/Qwen3-ASR-1.7B-hf build --max-frames 16000
 ```
 
 在本地构建实验性 INT8 encoder（不包含在已发布模型文件中）：
@@ -96,7 +104,7 @@ uv run python tools\quantize_awq.py --group 32 --utterances 128 ^
 
 得到的 checkpoint 是折叠过缩放的普通 FP16 模型，用 `transformers` 加载即可复现原模型；真正的 INT4 打包发生在构造 `W4A16ASRDecoder` 时。0.6B 的 prefill 引擎用 FP16 构建、并把输出投影留在引擎里：在 2,620 条语料上，它比 INT4 prefill 的 WER 好 0.089 个百分点、快 1.7 ms。把这个 0.6B 引擎的投影移出去，prefill 时间仍是 9.4 ms，但多 4 个编辑。
 
-1.7B 则相反：把输出投影放进引擎时，FP16 prefill 引擎为 3.29 GB，在 8 GB 显存下与 decoder 权重放在一起只剩 1.24 GB 空闲；在这个水平上 TensorRT 每一步都要重读权重页，全量语料 prefill 中位数为 222 ms。用 `build-decoder-prefill`（不加 `--keep-lm-head`）把投影移出引擎后，引擎为 2.69 GB，prefill 为 20.6 ms，输出投影改由 decode 循环本来就在用的 INT4 `lm_head` GEMV 完成。在 2,620 条语料上 WER 为 1.9876%，与把投影放在引擎里时完全一致，比 INT4 prefill 引擎好 0.015 个百分点。
+1.7B 则相反：把输出投影放进引擎时，FP16 prefill 引擎为 3.29 GB。在 8 GB 显存下它和 decoder 权重放在一起余量不够，TensorRT 每一步都要重读权重页，全量语料 prefill 中位数为 222 ms。用 `build-decoder-prefill`（不加 `--keep-lm-head`）把投影移出引擎后，引擎为 2.69 GB，prefill 为 20.6 ms，输出投影改由 decode 循环本来就在用的 INT4 `lm_head` GEMV 完成。在 2,620 条语料上 WER 为 1.9876%，与把投影放在引擎里时完全一致，比 INT4 prefill 引擎好 0.015 个百分点。
 
 ```powershell
 uv run qwen3-asr --model .\models\Qwen3-ASR-1.7B-hf-awq32 build-decoder-prefill --max-seq 512 --opt-seq 256 `
@@ -106,7 +114,7 @@ uv run qwen3-asr --model .\models\Qwen3-ASR-1.7B-hf-awq32 transcribe .\audio.wav
   --decoder-engine artifacts\qwen3-asr-1.7b\decoder-prefill\asr-prefill.fp16.engine
 ```
 
-`--max-seq` 是 prefill 引擎能接受的最长 prompt，必须覆盖整条音频：音频 token 占满 prompt，约为每秒音频 13 个 token，默认的 512 覆盖约 39 秒。更长的 profile 会在运行时按序列长度线性占用显存；`--max-cache`（默认 2048）限制 KV cache；超过 profile 的 prompt 会直接报错，不会被截断。作为参照，Transformers checkpoint 支持 65,536 个位置。
+`--max-seq` 是 prefill 引擎能接受的最长 prompt，必须覆盖整条音频——音频 token 占满 prompt，约为每秒音频 13 个 token，默认的 512 覆盖约 39 秒。encoder 引擎另有自己的上限（`--max-frames`，3600 帧），两者都覆盖住音频，长文件才能一次转完。`--max-cache` 是 KV 上限而不是预留量，不需要按文件调，下一节说明这两个参数。超过 profile 的 prompt 会报错并指出应重建的数值，不会被截断。作为参照，Transformers checkpoint 支持 65,536 个位置。
 
 #### Decoder 参数
 
@@ -115,7 +123,7 @@ uv run qwen3-asr --model .\models\Qwen3-ASR-1.7B-hf-awq32 transcribe .\audio.wav
 | 参数 | 适用后端 | 默认值 | 作用 |
 | --- | --- | ---: | --- |
 | `--max-cache` | `tensorrt-w4a16` | 4096 | KV cache 的**上限**，不是预留量。解码器按每个请求实际需要的量分配 —— prompt 加 `--max-new-tokens`，向上取整到 256 个槽位 —— 遇到更长的请求时原地扩容，所以 30 秒的文件只用 768 个槽位（84 MB），145 秒的文件扩到 2560 个（280 MB）。两个尺寸每个槽位都是 112 KB（28 层 × 8 个 KV head × 128 × key/value 两份 × FP16），4096 个槽位为 448 MB，约合 5.2 分钟音频。 |
-| `--group` | `tensorrt-w4a16` | 32 | checkpoint 的 INT4 打包分组。已发布的 AWQ 权重是 group 32；`64` 只适用于按该分组打包的 checkpoint。 |
+| `--group` | `tensorrt-w4a16` | 32 | INT4 kernel 的打包粒度。checkpoint 以 FP16 形式发布、在加载时打包，所以 `64` 也能跑，但更粗：在 0.6B 上实测 WER 比 32 差 0.16 个百分点。所有已发布数字都用 32。 |
 | `--decoder-engine` | `tensorrt-w4a16` | `artifacts/<model>/decoder-prefill/asr-prefill.fp16.engine` | prefill 引擎。输出 `logits` 的引擎和输出 norm 后 `hidden` 的引擎都能加载。 |
 | `--max-context-tokens` | `tensorrt-exllama` | 8192 | EXL3 路径的 KV 预算。 |
 | `--engine` | 所有 TensorRT 后端 | `artifacts/<model>/encoder-window.bf16.engine` | 音频编码器引擎。 |
@@ -133,15 +141,19 @@ uv run qwen3-asr --model .\models\Qwen3-ASR-1.7B-hf-awq32 transcribe .\audio.wav
 
 `qwen3-asr build --max-frames N` 决定 encoder 引擎能接受的最长 mel 输入，单位是 10 ms 一帧：默认 3600 即 36 秒。
 
+两个构建命令的默认输出目录都由模型参数推出，所以名为 `Qwen3-ASR-1.7B-hf-awq32` 的 AWQ checkpoint 会写到 `artifacts/qwen3-asr-1.7b-hf-awq32/`，而不是 `artifacts/qwen3-asr-1.7b/`。想保持上面的目录布局请显式传 `--output-dir`。
+
 8 GB 卡上的实测配置：
 
-| 模型 | `--max-seq` | `--keep-lm-head` | `--max-cache` | prefill 引擎 | 结果 |
-| --- | ---: | --- | ---: | ---: | --- |
-| 0.6B | 512 | 是 | 2048 | 1142 MB | prefill 9.4 ms，中位 72.2 ms，WER 2.397% |
-| 1.7B | 512 | 否 | 2048 | 2694 MB | prefill 20.6 ms，中位 175.0 ms，WER 1.988% |
-| 1.7B，长音频 | 2048 | 否 | 4096 | 2694 MB | 145 秒文件一次转完，共 14.9 秒 |
+| 模型 | `--max-seq` | `--keep-lm-head` | KV cache | prefill 引擎 | 结果 |
+| --- | ---: | --- | --- | ---: | --- |
+| 0.6B | 512 | 是 | 固定 2048 槽 | 1142 MB | prefill 9.4 ms，中位 72.2 ms，WER 2.397% |
+| 1.7B | 512 | 否 | 固定 2048 槽 | 2694 MB | prefill 20.6 ms，中位 175.0 ms，WER 1.988% |
+| 1.7B，长音频 | 2048 | 否 | 实际分配 2560 槽 | 2694 MB | 145 秒文件一次转完，共 14.9 秒 |
 
-这个选择取决于显存，而不是模型大小：卡上还有余量就把投影留在引擎里，引擎加 decoder 权重之后余量太少才移出去。8 GB 卡上，1.7B 把投影放进引擎后只剩 1.24 GB，prefill 变成 222 ms；0.6B 的引擎只有 1.14 GB，放进去没有任何可测代价。
+前两行测于按请求分配之前，用的是固定 2048 槽预算；长音频那行用的是默认上限。
+
+这个选择取决于显存，而不是模型大小：卡上还有余量就把投影留在引擎里，引擎加 decoder 权重之后余量太少才移出去。8 GB 卡上，1.7B 把投影放进引擎后 prefill 为 222 ms；0.6B 的引擎只有 1.14 GB，放进去没有任何可测代价。
 
 #### 更长的音频
 
@@ -153,9 +165,9 @@ uv run qwen3-asr --model .\models\Qwen3-ASR-1.7B-hf-awq32 transcribe .\audio.wav
 | decoder prefill | `build-decoder-prefill --max-seq` | 512 token | 39 秒 |
 | KV cache | `transcribe --max-cache` | 上限 4096 | 5.2 分钟 |
 
-三者都是显存问题，不是算力问题。145 秒的文件需要 14,500 个 mel 帧和 1,903 个 token 的 prompt，因此在 decoder 之前就先被 encoder 挡住；用 `--max-frames 16000` 重建 encoder 得到的是 610 MB 的引擎，和 36 秒版本一样大，之后这个文件可以一次转完：总共 14.9 秒 —— 预处理 1.0 秒、encoder 0.17 秒、prefill 8.0 秒、解码 477 个 token 用 5.6 秒。这里 prefill 占大头，因为 attention 随 prompt 长度平方增长，而那时只剩约 0.5 GB 空闲显存。两个上限溢出时都会报错，并指出该改哪个参数、改成多少。
+三者都是显存问题，不是算力问题。145 秒的文件需要 14,500 个 mel 帧和 1,903 个 token 的 prompt，因此在 decoder 之前就先被 encoder 挡住；用 `--max-frames 16000` 重建 encoder 得到的是 610 MB 的引擎，和 36 秒版本一样大，之后这个文件可以一次转完：总共 14.9 秒 —— 预处理 1.0 秒、encoder 0.17 秒、prefill 8.0 秒、解码 477 个 token 用 5.6 秒。在短音频上 prefill 只占 12%，这里占到 54%，因为 attention 随 prompt 长度平方增长。两个上限溢出时都会报错，并指出该改哪个参数、改成多少。
 
-decoder 这一侧的代价几乎不在引擎体积上 —— 512、1024、2048 构建出的 1.7B 引擎都是 2693.9 MB —— 但 TensorRT 按最大 profile 形状分配激活缓冲，所以进程加载时会多占显存。1.7B 在构造完成后：512 profile 剩 990 MB、1024 剩 912 MB、2048 剩 752 MB；同样 100 条上 prefill 分别为 22.7、24.8、24.3 ms，转写结果完全相同。
+decoder 这一侧的代价几乎不在引擎体积上 —— 512、1024、2048 构建出的 1.7B 引擎都是 2693.9 MB —— 但 TensorRT 按最大 profile 形状分配激活缓冲，所以更大的 profile 在加载时会多占显存：2048 profile 比 512 多 238 MB。同样 100 条上，512、1024、2048 的 prefill 分别为 22.7、24.8、24.3 ms，转写结果完全相同。
 
 KV cache 按请求分配，所以进程实际占用的不是上限值：
 
@@ -194,6 +206,14 @@ uv run qwen3-asr --model Qwen/Qwen3-ForcedAligner-0.6B quantize --bits 4 --head-
 uv run qwen3-asr --model Qwen/Qwen3-ASR-1.7B-hf transcribe .\audio.wav --backend tensorrt-exllama --language Chinese
 ```
 
+## 单文件基准测试
+
+```powershell
+uv run qwen3-asr --model Qwen/Qwen3-ASR-1.7B-hf benchmark .\audio.wav --backend tensorrt-w4a16 --warmups 2 --repeats 10
+```
+
+`--model` 和 `--max-new-tokens` 是全局参数，必须写在子命令之前；其余参数写在子命令之后。`benchmark` 输出均值、中位数、p90、最小/最大延迟、实时系数（RTF）、各阶段中位数、转写文本；如果音频旁边有 `<audio>.json` 且其中含 `reference` 字段，还会给出 WER。
+
 ## 对齐音频
 
 ```powershell
@@ -220,7 +240,7 @@ API 默认只监听本机地址，支持 WAV、MP3、FLAC、OGG、M4A 和 AAC �
 
 ## 基准测试
 
-LibriSpeech `test-clean` 全量 2,620 条音频、53,120 个参考词。延迟为全量中位数；30–200 条的子集因前若干条要付进程与频率爬升的代价，会高 20–40%。Corpus WER 是确定性的、可跨 session 复现；延迟只在同一 session 内可比。EXL3 4 bpw 各行与 0.6B 的 W4A16 行于 2026-11-12 使用窗口化编码器测量，1.7B 的 W4A16 行于 2026-11-14 测量；把 2026-11-12 的一项在后者重测，中位数从 208.8 ms 变为 211.5 ms。3 bpw 与 GGUF 各行来自 2026-11-11 的运行。
+LibriSpeech `test-clean` 全量 2,620 条音频、53,120 个参考词。延迟为全量中位数；30–200 条的子集因前若干条要付进程与频率爬升的代价，会高 20–40%。Corpus WER 是确定性的、可跨 session 复现；延迟只在同一 session 内可比。EXL3 4 bpw 各行与 0.6B 的 W4A16 行于 2026-11-12 使用窗口化编码器测量，1.7B 的 W4A16 行于 2026-11-14 测量；把 2026-11-12 的一项在后者重测，中位数从 208.8 ms 变为 211.5 ms。3 bpw 与 GGUF 各行来自 2026-11-11 的运行。2026-11-14 的两行后来用按请求分配的 KV cache 重跑过，WER 逐位复现。
 
 | 模型 | 后端 | Corpus WER | 中位延迟 ms |
 | --- | --- | ---: | ---: |

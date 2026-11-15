@@ -36,8 +36,8 @@ All numbers are the 2,620 LibriSpeech `test-clean` utterances, greedy decoding, 
 | --- | ---: | ---: |
 | Official `qwen-asr` Transformers BF16 | 2.321% | 787.1 ms |
 | EXL3 4 bpw, train-clean-100 | 2.362% | 99.8 ms |
-| **W4A16 AWQ, group 32** | **2.397%** | **72.2 ms** |
 | EXL3 4 bpw, legacy | 2.383% | 99.5 ms |
+| **W4A16 AWQ, group 32** | **2.397%** | **72.2 ms** |
 | GGUF INT4 + Q4_K | 2.982% | 299.2 ms |
 
 This decoder runs 1.38× faster than both EXL3 4 bpw decoders. Its corpus WER is 0.014 points above the legacy decoder and 0.035 above the calibrated one; a 20-edit difference on this corpus corresponds to about 0.02 points, so the three sit at the same level.
@@ -62,9 +62,9 @@ Windows is tested and supported. Linux should work with compatible CUDA, TensorR
 | Setting | Value | Notes |
 | --- | --- | --- |
 | `--backend` | `tensorrt-w4a16` | Selects this decoder in `transcribe`, `benchmark`, and `serve`. |
-| `--group` | 32 | Matches the packed weights. `64` only matches a checkpoint packed that way. |
+| `--group` | 32 | Packing granularity of the INT4 kernels. The checkpoint ships as FP16 and is packed at load time, so `64` runs too but is coarser. All published numbers use 32. |
 | `--max-cache` | 4096 | Ceiling on the KV cache. The decoder allocates prompt + `--max-new-tokens` in 256-slot steps, so short audio holds 768 slots (84 MB) and a 145 s file grows to 2560 (280 MB). 4096 slots is 448 MB and about 5.2 minutes of audio. |
-| `--max-seq` at build | 512 | Longest prompt accepted, about 39 seconds of audio. Raise it for longer utterances; a longer prompt raises an error. |
+| `--max-seq` at build | 512 | Longest prompt accepted, about 39 seconds of audio. Raise it for longer utterances; a longer prompt raises an error. The encoder engine has its own ceiling of 3600 mel frames, 36 seconds, raised with `qwen3-asr build --max-frames`. |
 | output projection | inside the engine | Removing it left the 9.4 ms prefill unchanged, so the 296 MB it saves buys no speed. |
 
 ## 中文
@@ -85,8 +85,8 @@ Windows is tested and supported. Linux should work with compatible CUDA, TensorR
 | --- | ---: | ---: |
 | 官方 `qwen-asr` Transformers BF16 | 2.321% | 787.1 ms |
 | EXL3 4 bpw，train-clean-100 校准 | 2.362% | 99.8 ms |
-| **W4A16 AWQ，group 32** | **2.397%** | **72.2 ms** |
 | EXL3 4 bpw，旧版 | 2.383% | 99.5 ms |
+| **W4A16 AWQ，group 32** | **2.397%** | **72.2 ms** |
 | GGUF INT4 + Q4_K | 2.982% | 299.2 ms |
 
 本解码器比两个 EXL3 4 bpw 解码器都快 1.38 倍。语料 WER 比旧版高 0.014 个百分点、比校准版高 0.035 个百分点；本语料上 20 个编辑的差异约对应 0.02 个百分点，三者处于同一水平。
@@ -109,7 +109,7 @@ AWQ 意义上的激活感知量化：先对 AWQ 指数做网格搜索得到逐�
 | 参数 | 取值 | 说明 |
 | --- | --- | --- |
 | `--backend` | `tensorrt-w4a16` | 在 `transcribe`、`benchmark`、`serve` 中选中本解码器。 |
-| `--group` | 32 | 与打包权重一致。`64` 只适用于按该分组打包的 checkpoint。 |
+| `--group` | 32 | INT4 kernel 的打包粒度。checkpoint 以 FP16 发布、加载时打包，所以 `64` 也能跑，但更粗。所有已发布数字都用 32。 |
 | `--max-cache` | 4096 | KV cache 的上限。解码器按 prompt 加 `--max-new-tokens` 以 256 槽为步长分配，所以短音频只占 768 槽（84 MB），145 秒的文件扩到 2560 槽（280 MB）。4096 槽为 448 MB，约合 5.2 分钟音频。 |
-| 构建时的 `--max-seq` | 512 | 能接受的最长 prompt，约合 39 秒音频；更长的音频要调大，否则直接报错。 |
+| 构建时的 `--max-seq` | 512 | 能接受的最长 prompt，约合 39 秒音频；更长的音频要调大，否则直接报错。encoder 引擎另有 3600 个 mel 帧（36 秒）的上限，用 `qwen3-asr build --max-frames` 调整。 |
 | 输出投影 | 留在引擎内 | 移出后 9.4 ms 的 prefill 不变，省下的 296 MB 换不来速度。 |

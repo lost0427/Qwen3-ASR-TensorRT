@@ -34,7 +34,7 @@ class _PackedLinear:
     as a plain fp16 matmul instead of the INT4 GEMV.
     """
 
-    def __init__(self, weight: Tensor, group: int = 64, keep_fp16: bool = False):
+    def __init__(self, weight: Tensor, group: int = 32, keep_fp16: bool = False):
         weight = weight.detach().to(device="cuda", dtype=torch.float16).contiguous()
         self.out_features = weight.shape[0]
         self.fp16 = weight if keep_fp16 else None
@@ -126,7 +126,7 @@ class W4A16ASRDecoder:
         model_id: str,
         prefill_engine: Path,
         max_cache: int = 4096,
-        group: int = 64,
+        group: int = 32,
         keep_fp16: frozenset[str] = frozenset(),
         growth_stride: int = 256,
     ):

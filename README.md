@@ -29,10 +29,12 @@ Published model files:
 - [EXL3 decoder: legacy 3 bpw and 4 bpw](https://huggingface.co/Retrieve0/Qwen3-ASR-1.7B-EXL3-Decoder)
 - [1.7B EXL3 3 bpw, recalibrated with train-clean-100](https://huggingface.co/Retrieve0/Qwen3-ASR-1.7B-EXL3-Decoder/tree/main/decoder-exl3-3bpw-train-clean-100) (separate directory in the same decoder repository)
 - [1.7B EXL3 4 bpw, recalibrated with train-clean-100](https://huggingface.co/Retrieve0/Qwen3-ASR-1.7B-EXL3-Decoder/tree/main/decoder-exl3-4bpw-train-clean-100) (separate directory in the same decoder repository)
+- [1.7B W4A16 decoder, AWQ group 32](https://huggingface.co/Retrieve0/Qwen3-ASR-1.7B-W4A16-Decoder)
 - [0.6B TensorRT encoder: BF16 and FP16 ONNX](https://huggingface.co/Retrieve0/Qwen3-ASR-0.6B-TensorRT-Encoder)
 - [0.6B EXL3 decoder: legacy 3 bpw and 4 bpw](https://huggingface.co/Retrieve0/Qwen3-ASR-0.6B-EXL3-Decoder)
 - [0.6B EXL3 3 bpw, recalibrated with train-clean-100](https://huggingface.co/Retrieve0/Qwen3-ASR-0.6B-EXL3-Decoder/tree/main/decoder-exl3-3bpw-train-clean-100) (separate directory in the same decoder repository)
 - [0.6B EXL3 4 bpw, recalibrated with train-clean-100](https://huggingface.co/Retrieve0/Qwen3-ASR-0.6B-EXL3-Decoder/tree/main/decoder-exl3-4bpw-train-clean-100) (separate directory in the same decoder repository)
+- [0.6B W4A16 decoder, AWQ group 32](https://huggingface.co/Retrieve0/Qwen3-ASR-0.6B-W4A16-Decoder)
 - [Qwen3-ForcedAligner 0.6B TensorRT encoder](https://huggingface.co/Retrieve0/Qwen3-ForcedAligner-0.6B-TensorRT-Encoder)
 - [Qwen3-ForcedAligner 0.6B EXL3 4 bpw decoder](https://huggingface.co/Retrieve0/Qwen3-ForcedAligner-0.6B-EXL3-Decoder)
 
@@ -50,6 +52,12 @@ Build an FP16 encoder for GPUs without BF16 support:
 
 ```powershell
 uv run qwen3-asr --model Qwen/Qwen3-ASR-1.7B-hf build --encoder-precision fp16
+```
+
+Both commands give the encoder engine a 36-second input ceiling. Add `--max-frames` for longer audio, at 100 mel frames per second:
+
+```powershell
+uv run qwen3-asr --model Qwen/Qwen3-ASR-1.7B-hf build --max-frames 16000
 ```
 
 Build an experimental local INT8 encoder (not included in the published model files):
@@ -96,7 +104,7 @@ uv run python tools\quantize_awq.py --group 32 --utterances 128 ^
 
 The resulting checkpoint is a plain FP16 model with folded scales, so it loads with `transformers` and reproduces the base model. The INT4 packing happens when the decoder is constructed (`W4A16ASRDecoder`). Build the 0.6B prefill engine as FP16 with the output projection inside the engine: on 2,620 utterances that measured 0.089 points better WER than an INT4 prefill engine and 1.7 ms faster. Moving the projection out of the 0.6B engine leaves the prefill time unchanged at 9.4 ms and costs 4 edits.
 
-The 1.7B prefill engine with the output projection inside is 3.29 GB, which leaves 1.24 GB free on an 8 GB card next to the decoder weights; at that level TensorRT re-reads its weight pages every step and the full-corpus prefill median is 222 ms. Leave the projection out (`build-decoder-prefill` without `--keep-lm-head`): the engine drops to 2.69 GB, prefill to 20.6 ms, and the runtime applies the INT4 `lm_head` GEMV that the decode loop already uses. On 2,620 utterances the WER is 1.9876%, identical to the engine with the projection inside, and 0.015 points better than the INT4 prefill engine.
+The 1.7B prefill engine with the output projection inside is 3.29 GB. On an 8 GB card that leaves too little room next to the decoder weights, TensorRT re-reads its weight pages every step, and the full-corpus prefill median is 222 ms. Leave the projection out (`build-decoder-prefill` without `--keep-lm-head`): the engine drops to 2.69 GB, prefill to 20.6 ms, and the runtime applies the INT4 `lm_head` GEMV that the decode loop already uses. On 2,620 utterances the WER is 1.9876%, identical to the engine with the projection inside, and 0.015 points better than the INT4 prefill engine.
 
 ```powershell
 uv run qwen3-asr --model .\models\Qwen3-ASR-1.7B-hf-awq32 build-decoder-prefill --max-seq 512 --opt-seq 256 `
@@ -106,7 +114,9 @@ uv run qwen3-asr --model .\models\Qwen3-ASR-1.7B-hf-awq32 transcribe .\audio.wav
   --decoder-engine artifacts\qwen3-asr-1.7b\decoder-prefill\asr-prefill.fp16.engine
 ```
 
-`--max-seq` is the longest prompt the prefill engine accepts and it has to cover the whole utterance: the audio tokens dominate the prompt, at roughly 13 tokens per second of audio. The default 512 covers about 39 seconds. A longer profile costs memory linearly at run time; `--max-cache` (default 2048) bounds the KV cache, and a prompt longer than the profile raises an error instead of being truncated. For reference, the Transformers checkpoint accepts 65,536 positions.
+`--max-seq` is the longest prompt the prefill engine accepts and it has to cover the whole utterance, because the audio tokens dominate the prompt at roughly 13 per second of audio; the default 512 covers about 39 seconds. The encoder engine has its own ceiling (`--max-frames`, 3600 frames), and both have to cover the audio before a long file transcodes in one pass. `--max-cache` is a KV ceiling rather than a reservation, so it needs no tuning per file; the next section covers both knobs. For reference, the Transformers checkpoint accepts 65,536 positions.
+
+A prompt longer than the profile raises an error naming the value to rebuild with instead of being truncated.
 
 #### Decoder parameters
 
@@ -115,7 +125,7 @@ Runtime flags, shared by `transcribe`, `benchmark` and `serve`:
 | Flag | Backend | Default | Effect |
 | --- | --- | ---: | --- |
 | `--max-cache` | `tensorrt-w4a16` | 4096 | Ceiling on the KV cache, not a reservation. The decoder allocates what each request needs — prompt plus `--max-new-tokens`, rounded up to 256 slots — and grows in place when a longer request arrives, so a 30 s file uses 768 slots (84 MB) and a 145 s file grows to 2560 (280 MB). Both sizes spend 112 KB per slot (28 layers × 8 KV heads × 128 × 2 values × FP16), so 4096 slots is 448 MB and about 5.2 minutes of audio. |
-| `--group` | `tensorrt-w4a16` | 32 | INT4 packing group of the checkpoint. The published AWQ weights are group 32; `64` matches only a checkpoint packed that way. |
+| `--group` | `tensorrt-w4a16` | 32 | Packing granularity of the INT4 kernels. The checkpoint ships as FP16 and is packed at load time, so `64` also runs, but it is coarser: on 0.6B it measured 0.16 points worse WER than 32. All published numbers use 32. |
 | `--decoder-engine` | `tensorrt-w4a16` | `artifacts/<model>/decoder-prefill/asr-prefill.fp16.engine` | Prefill engine. Engines that emit `logits` and engines that emit the normed `hidden` both load. |
 | `--max-context-tokens` | `tensorrt-exllama` | 8192 | KV budget of the EXL3 path. |
 | `--engine` | all TensorRT backends | `artifacts/<model>/encoder-window.bf16.engine` | Audio encoder engine. |
@@ -133,15 +143,19 @@ Build flags for `build-decoder-prefill`:
 
 `qwen3-asr build --max-frames N` sets the longest mel input the encoder engine accepts, in frames of 10 ms: the default 3600 is 36 seconds.
 
+Both build commands derive their default output directory from the model argument, so an AWQ checkpoint named `Qwen3-ASR-1.7B-hf-awq32` writes to `artifacts/qwen3-asr-1.7b-hf-awq32/`, not to `artifacts/qwen3-asr-1.7b/`. Pass `--output-dir` to keep the layouts shown here.
+
 Measured configurations on an 8 GB card:
 
-| Model | `--max-seq` | `--keep-lm-head` | `--max-cache` | Prefill engine | Result |
-| --- | ---: | --- | ---: | ---: | --- |
-| 0.6B | 512 | yes | 2048 | 1142 MB | 9.4 ms prefill, 72.2 ms median, 2.397% WER |
-| 1.7B | 512 | no | 2048 | 2694 MB | 20.6 ms prefill, 175.0 ms median, 1.988% WER |
-| 1.7B, long audio | 2048 | no | 4096 | 2694 MB | 145 s file in one pass, 14.9 s total |
+| Model | `--max-seq` | `--keep-lm-head` | KV cache | Prefill engine | Result |
+| --- | ---: | --- | --- | ---: | --- |
+| 0.6B | 512 | yes | 2048 slots fixed | 1142 MB | 9.4 ms prefill, 72.2 ms median, 2.397% WER |
+| 1.7B | 512 | no | 2048 slots fixed | 2694 MB | 20.6 ms prefill, 175.0 ms median, 1.988% WER |
+| 1.7B, long audio | 2048 | no | 2560 slots allocated | 2694 MB | 145 s file in one pass, 14.9 s total |
 
-The choice follows memory, not the model size: keep the projection inside the engine while the card still has room for it, and drop it when the engine plus the decoder weights leave too little. On 8 GB the 1.7B engine with the projection inside leaves 1.24 GB and prefill costs 222 ms, while the 1.14 GB 0.6B engine fits with no measurable cost.
+The first two rows predate the per-request cache and used a fixed 2048-slot budget; the long-audio row uses the default ceiling.
+
+The choice follows memory, not the model size: keep the projection inside the engine while the card still has room for it, and drop it when the engine plus the decoder weights leave too little. On 8 GB the 1.7B engine with the projection inside runs prefill at 222 ms, while the 1.14 GB 0.6B engine fits with no measurable cost.
 
 #### Longer audio
 
@@ -153,9 +167,9 @@ Three limits decide how much audio one call takes, and on the shipped engines th
 | Decoder prefill | `build-decoder-prefill --max-seq` | 512 tokens | 39 s |
 | KV cache | `transcribe --max-cache` | ceiling, 4096 | 5.2 min |
 
-All three are memory, not compute. A 145 s file needs 14,500 mel frames and a 1,903-token prompt, so it fails on the encoder before the decoder sees it; rebuilding the encoder with `--max-frames 16000` gives a 610 MB engine, the same size as the 36 s one, and the file then transcribes in one pass: 14.9 s in total — 1.0 s preprocessing, 0.17 s encoder, 8.0 s prefill and 5.6 s decoding 477 tokens. Prefill is 12% of the runtime on short utterances and 54% here; attention grows with the square of the prompt, and about 0.5 GB of memory is free at that length on this card. Both overruns raise a message that names the knob and the value to rebuild with.
+All three are memory, not compute. A 145 s file needs 14,500 mel frames and a 1,903-token prompt, so it fails on the encoder before the decoder sees it; rebuilding the encoder with `--max-frames 16000` gives a 610 MB engine, the same size as the 36 s one, and the file then transcribes in one pass: 14.9 s in total — 1.0 s preprocessing, 0.17 s encoder, 8.0 s prefill and 5.6 s decoding 477 tokens. Prefill is 12% of that pipeline on short utterances and 54% here, because attention grows with the square of the prompt. Either overrun names the knob and the value to rebuild with.
 
-The decoder side costs next to nothing in engine size — 512, 1024 and 2048 all produce a 2693.9 MB 1.7B engine — but TensorRT allocates activation buffers at the maximum profile shape, so the process reserves more at load time. On 1.7B the decoder leaves 990 MB free after construction with a 512 profile, 912 MB with 1024 and 752 MB with 2048; prefill measured 22.7, 24.8 and 24.3 ms on the same 100 utterances and produced identical transcripts.
+The decoder side costs next to nothing in engine size — 512, 1024 and 2048 all produce a 2693.9 MB 1.7B engine — but TensorRT allocates activation buffers at the maximum profile shape, so a larger profile holds more memory at load time: the 2048 profile costs 238 MB more than the 512 one. Prefill measured 22.7, 24.8 and 24.3 ms on the same 100 utterances at 512, 1024 and 2048, with identical transcripts.
 
 The KV cache is sized per request, so the ceiling is not what the process holds:
 
@@ -194,6 +208,14 @@ uv run qwen3-asr --model Qwen/Qwen3-ForcedAligner-0.6B quantize --bits 4 --head-
 uv run qwen3-asr --model Qwen/Qwen3-ASR-1.7B-hf transcribe .\audio.wav --backend tensorrt-exllama --language Chinese
 ```
 
+## Benchmark one file
+
+```powershell
+uv run qwen3-asr --model Qwen/Qwen3-ASR-1.7B-hf benchmark .\audio.wav --backend tensorrt-w4a16 --warmups 2 --repeats 10
+```
+
+`--model` and `--max-new-tokens` are global flags and go before the subcommand; everything else follows it. `benchmark` prints mean, median, p90, min and max latency, the realtime factor, per-stage medians, the transcript, and a WER if an `<audio>.json` file next to the audio holds a `reference` field.
+
 ## Align audio
 
 ```powershell
@@ -225,7 +247,7 @@ The API binds to loopback by default and accepts WAV, MP3, FLAC, OGG, M4A, and A
 
 ## Benchmarks
 
-LibriSpeech `test-clean`, all 2,620 utterances, 53,120 reference words. Latencies are full-corpus medians; 30–200-utterance subsets run 20–40% higher because the first utterances pay for process and clock warm-up. Corpus WER is deterministic and reproduces across sessions; latency is only comparable within one session. The EXL3 4 bpw rows and the 0.6B W4A16 row were measured on 2026-11-12 with the windowed encoder, the 1.7B W4A16 row on 2026-11-14; re-running one 2026-11-12 entry in the later session moved its median from 208.8 ms to 211.5 ms. The 3 bpw and GGUF rows are the 2026-11-11 runs.
+LibriSpeech `test-clean`, all 2,620 utterances, 53,120 reference words. Latencies are full-corpus medians; 30–200-utterance subsets run 20–40% higher because the first utterances pay for process and clock warm-up. Corpus WER is deterministic and reproduces across sessions; latency is only comparable within one session. The EXL3 4 bpw rows and the 0.6B W4A16 row were measured on 2026-11-12 with the windowed encoder, the 1.7B W4A16 row on 2026-11-14; re-running one 2026-11-12 entry in the later session moved its median from 208.8 ms to 211.5 ms. The 3 bpw and GGUF rows are the 2026-11-11 runs. The 2026-11-14 rows were re-run later with the per-request KV cache, which reproduced the WER to the digit.
 
 | Model | Backend | Corpus WER | Median ms |
 | --- | --- | ---: | ---: |
