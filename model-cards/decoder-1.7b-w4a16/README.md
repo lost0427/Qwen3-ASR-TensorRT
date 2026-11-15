@@ -28,6 +28,8 @@ Weights are stored as packed INT4 (two values per byte along the contraction axi
 
 This is **not** an AutoAWQ, GPTQ, or ExLlamaV3 checkpoint. `transformers`, vLLM, and other runtimes cannot load it as a quantized model — only this project's runtime consumes the INT4 layout. The repository ships the folded FP16 checkpoint (`model.safetensors`); the runtime packs it into INT4 when the decoder is constructed, so loading it with plain `transformers` simply reproduces the base model.
 
+A packed INT4 variant is published separately: [Retrieve0/Qwen3-ASR-1.7B-W4A16-Decoder-INT4](https://huggingface.co/Retrieve0/Qwen3-ASR-1.7B-W4A16-Decoder-INT4). It carries the same quantisation without the FP16 weights or the audio tower, 1.50 GB instead of 3.81 GB.
+
 ### Accuracy and speed
 
 All numbers are the 2,620 LibriSpeech `test-clean` utterances, greedy decoding, RTX 4060 Laptop:
@@ -80,6 +82,8 @@ Calibration used 128 utterances from LibriSpeech `train-clean-100`. No `test-cle
 权重按收缩轴每字节两个值打包，每 32 个权重一个 FP16 scale，对称量化、无零点。decode 步骤由自写 INT4 kernel 完成。
 
 这**不是** AutoAWQ、GPTQ 或 ExLlamaV3 格式的 checkpoint。`transformers`、vLLM 等运行时无法把它当作量化模型加载，只有本项目的运行时能消费这种 INT4 布局。仓库提供的是折叠过缩放的 FP16 checkpoint（`model.safetensors`），运行时在构造 decoder 时才会打包成 INT4 —— 因此用普通 `transformers` 加载它只会得到原模型。
+
+另有一个预打包 INT4 版本：[Retrieve0/Qwen3-ASR-1.7B-W4A16-Decoder-INT4](https://huggingface.co/Retrieve0/Qwen3-ASR-1.7B-W4A16-Decoder-INT4)。量化结果相同，但不含 FP16 权重和 audio tower，1.50 GB 而非 3.81 GB。
 
 ### 精度与速度
 

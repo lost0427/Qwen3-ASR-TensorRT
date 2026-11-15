@@ -30,11 +30,13 @@ uv sync
 - [1.7B EXL3 3 bpw：使用 train-clean-100 重新校准](https://huggingface.co/Retrieve0/Qwen3-ASR-1.7B-EXL3-Decoder/tree/main/decoder-exl3-3bpw-train-clean-100)（同一 decoder 仓库中的独立目录）
 - [1.7B EXL3 4 bpw：使用 train-clean-100 重新校准](https://huggingface.co/Retrieve0/Qwen3-ASR-1.7B-EXL3-Decoder/tree/main/decoder-exl3-4bpw-train-clean-100)（同一 decoder 仓库中的独立目录）
 - [1.7B W4A16 decoder，AWQ group 32](https://huggingface.co/Retrieve0/Qwen3-ASR-1.7B-W4A16-Decoder)
+- [1.7B W4A16 decoder，预打包 INT4，group 32](https://huggingface.co/Retrieve0/Qwen3-ASR-1.7B-W4A16-Decoder-INT4)（下载更小，仅含 decoder）
 - [0.6B TensorRT encoder：BF16 和 FP16 ONNX](https://huggingface.co/Retrieve0/Qwen3-ASR-0.6B-TensorRT-Encoder)
 - [0.6B EXL3 decoder：legacy 3 bpw 和 4 bpw](https://huggingface.co/Retrieve0/Qwen3-ASR-0.6B-EXL3-Decoder)
 - [0.6B EXL3 3 bpw：使用 train-clean-100 重新校准](https://huggingface.co/Retrieve0/Qwen3-ASR-0.6B-EXL3-Decoder/tree/main/decoder-exl3-3bpw-train-clean-100)（同一 decoder 仓库中的独立目录）
 - [0.6B EXL3 4 bpw：使用 train-clean-100 重新校准](https://huggingface.co/Retrieve0/Qwen3-ASR-0.6B-EXL3-Decoder/tree/main/decoder-exl3-4bpw-train-clean-100)（同一 decoder 仓库中的独立目录）
 - [0.6B W4A16 decoder，AWQ group 32](https://huggingface.co/Retrieve0/Qwen3-ASR-0.6B-W4A16-Decoder)
+- [0.6B W4A16 decoder，预打包 INT4，group 32](https://huggingface.co/Retrieve0/Qwen3-ASR-0.6B-W4A16-Decoder-INT4)（下载更小，仅含 decoder）
 - [Qwen3-ForcedAligner 0.6B TensorRT encoder](https://huggingface.co/Retrieve0/Qwen3-ForcedAligner-0.6B-TensorRT-Encoder)
 - [Qwen3-ForcedAligner 0.6B EXL3 4 bpw decoder](https://huggingface.co/Retrieve0/Qwen3-ForcedAligner-0.6B-EXL3-Decoder)
 
@@ -116,6 +118,19 @@ uv run qwen3-asr --model .\models\Qwen3-ASR-1.7B-hf-awq32 transcribe .\audio.wav
 
 `--max-seq` 是 prefill 引擎能接受的最长 prompt，必须覆盖整条音频——音频 token 占满 prompt，约为每秒音频 13 个 token，默认的 512 覆盖约 39 秒。encoder 引擎另有自己的上限（`--max-frames`，3600 帧），两者都覆盖住音频，长文件才能一次转完。`--max-cache` 是 KV 上限而不是预留量，不需要按文件调，下一节说明这两个参数。超过 profile 的 prompt 会报错并指出应重建的数值，不会被截断。作为参照，Transformers checkpoint 支持 65,536 个位置。
 
+#### 预打包 INT4 decoder
+
+`pack-decoder` 写出一个只含 decoder 的 checkpoint：投影权重里已经是 INT4 半字节加每 32 个权重一个 FP16 scale，`embed_tokens` 和归一化权重保持 FP16，`audio_tower` 不写入（推理时由 TensorRT encoder 取代）。运行时检测到 `packed_config.json` 就直接加载这些张量，不再需要 FP16 权重。
+
+```powershell
+uv run qwen3-asr --model .\models\Qwen3-ASR-1.7B-hf-awq32 pack-decoder --group 32 --output-dir artifacts\qwen3-asr-1.7b\decoder-int4
+uv run qwen3-asr --model artifacts\qwen3-asr-1.7b\decoder-int4 transcribe .\audio.wav --backend tensorrt-w4a16 `
+  --engine artifacts\qwen3-asr-1.7b\encoder-window.bf16.engine `
+  --decoder-engine artifacts\qwen3-asr-1.7b\decoder-prefill\asr-prefill.fp16.engine
+```
+
+预打包目录 0.6B 为 628 MB、1.7B 为 1528 MB，对应的 FP16 checkpoint 是 1492 MB 和 3887 MB。半字节由加载时打包所用的同一个 kernel 生成，因此预打包版本与 FP16 路径逐位一致。`--group` 被固化在文件里，向加载器传入其它值会报错。已发布的仓库可以直接写成 `--model Retrieve0/Qwen3-ASR-1.7B-W4A16-Decoder-INT4`。
+
 #### Decoder 参数
 
 `transcribe`、`benchmark`、`serve` 共用的运行期参数：
@@ -123,7 +138,7 @@ uv run qwen3-asr --model .\models\Qwen3-ASR-1.7B-hf-awq32 transcribe .\audio.wav
 | 参数 | 适用后端 | 默认值 | 作用 |
 | --- | --- | ---: | --- |
 | `--max-cache` | `tensorrt-w4a16` | 4096 | KV cache 的**上限**，不是预留量。解码器按每个请求实际需要的量分配 —— prompt 加 `--max-new-tokens`，向上取整到 256 个槽位 —— 遇到更长的请求时原地扩容，所以 30 秒的文件只用 768 个槽位（84 MB），145 秒的文件扩到 2560 个（280 MB）。两个尺寸每个槽位都是 112 KB（28 层 × 8 个 KV head × 128 × key/value 两份 × FP16），4096 个槽位为 448 MB，约合 5.2 分钟音频。 |
-| `--group` | `tensorrt-w4a16` | 32 | INT4 kernel 的打包粒度。checkpoint 以 FP16 形式发布、在加载时打包，所以 `64` 也能跑，但更粗：在 0.6B 上实测 WER 比 32 差 0.16 个百分点。所有已发布数字都用 32。 |
+| `--group` | `tensorrt-w4a16` | 32 | INT4 kernel 的打包粒度：每 32 个或每 64 个权重共用一个 FP16 scale。FP16 checkpoint 在加载时打包，所以 `64` 也能跑，但更粗 —— 在 0.6B 上实测 WER 比 32 差 0.16 个百分点。预打包 checkpoint 把该值固化在 `packed_config.json` 里。 |
 | `--decoder-engine` | `tensorrt-w4a16` | `artifacts/<model>/decoder-prefill/asr-prefill.fp16.engine` | prefill 引擎。输出 `logits` 的引擎和输出 norm 后 `hidden` 的引擎都能加载。 |
 | `--max-context-tokens` | `tensorrt-exllama` | 8192 | EXL3 路径的 KV 预算。 |
 | `--engine` | 所有 TensorRT 后端 | `artifacts/<model>/encoder-window.bf16.engine` | 音频编码器引擎。 |
@@ -237,6 +252,28 @@ curl.exe -X POST "http://127.0.0.1:8000/v1/transcribe?language=Chinese" `
 ```
 
 API 默认只监听本机地址，支持 WAV、MP3、FLAC、OGG、M4A 和 AAC 音频。
+
+## 磁盘预算
+
+推理需要 Python 环境，加上一个 encoder 引擎和一个 decoder 产物。以下为实测值，单位为 1024 MB 的 GB：
+
+| 后端 | 0.6B | 1.7B |
+| --- | ---: | ---: |
+| `tensorrt-w4a16`，FP16 checkpoint | 14.8 | 19.1 |
+| `tensorrt-w4a16`，预打包 INT4 decoder | 14.0 | 16.7 |
+| `tensorrt-exllama` | 12.9 | 14.0 |
+
+其中 11.9 GB 是两者共用的 Python 环境：torch 4.2 GB、`tensorrt_libs` 3.2 GB、CUDA 运行库 3.2 GB，以及只有量化和 ONNX 路径才用到的 `onnxruntime`、`triton`、`scipy` 共 0.6 GB。
+
+| 产物 | 0.6B | 1.7B |
+| --- | ---: | ---: |
+| encoder 引擎 | 359 MB | 610 MB |
+| prefill 引擎 | 1142 MB | 2694 MB |
+| FP16 checkpoint | 1492 MB | 3887 MB |
+| 预打包 decoder | 628 MB | 1528 MB |
+| EXL3 4 bpw decoder | 631 MB | 1502 MB |
+
+EXL3 后端不需要 prefill 引擎，也不需要 FP16 权重，只要 tokenizer 和 preprocessor 文件。引擎是按目标 GPU 本地构建的，无法直接下载；构建它们所用的 ONNX 文件在推理时不读取，可以删掉。
 
 ## 基准测试
 

@@ -9,6 +9,8 @@ synchronisation that made the all-TensorRT path slow.
 
 from __future__ import annotations
 
+import json
+import shutil
 from pathlib import Path
 
 import torch
@@ -16,6 +18,115 @@ import torch.nn.functional as F
 from torch import Tensor
 
 from .w4a16 import extension
+
+PACKED_FORMAT = "qwen3-asr-w4a16"
+PACKED_LAYOUT = (
+    "nibbles along the contraction axis, low nibble holds the even column; "
+    "value = round(w / scale) clipped to [-7, 7], scale = max|w| / 7 per group"
+)
+COPIED_FILES = (
+    "config.json",
+    "generation_config.json",
+    "tokenizer.json",
+    "tokenizer_config.json",
+    "processor_config.json",
+    "preprocessor_config.json",
+    "special_tokens_map.json",
+    "chat_template.jinja",
+)
+
+
+def read_packed_config(directory: str | Path) -> dict | None:
+    """Return the descriptor of a packed decoder directory, or None."""
+    path = Path(directory) / "packed_config.json"
+    if not path.is_file():
+        return None
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def resolve_packed(model_id: str) -> tuple[dict, Path] | None:
+    """Find a packed checkpoint, locally or in a Hub repository."""
+    local = Path(str(model_id))
+    if (local / "packed_config.json").is_file():
+        return read_packed_config(local), local / "model.safetensors"
+    if local.exists():
+        return None
+    try:
+        from huggingface_hub import hf_hub_download
+
+        descriptor = json.loads(
+            Path(hf_hub_download(str(model_id), "packed_config.json")).read_text(encoding="utf-8")
+        )
+        weights = Path(hf_hub_download(str(model_id), "model.safetensors"))
+    except Exception:
+        return None
+    return descriptor, weights
+
+
+def pack_decoder(model_id: str, output_dir: str | Path, group: int = 32) -> dict:
+    """Write a decoder-only INT4 checkpoint: packed projections, no audio tower."""
+    from safetensors.torch import save_file
+    from transformers import AutoModelForMultimodalLM
+
+    target = Path(output_dir)
+    target.mkdir(parents=True, exist_ok=True)
+    model = AutoModelForMultimodalLM.from_pretrained(
+        str(model_id), dtype=torch.float16, device_map="cpu", low_cpu_mem_usage=True
+    )
+    language = model.model.language_model
+    kernels = extension()
+    tensors: dict[str, Tensor] = {}
+
+    def keep(weight: Tensor) -> Tensor:
+        return weight.detach().to(torch.float16).contiguous()
+
+    def pack(name: str, weight: Tensor) -> None:
+        weight = weight.detach().to("cuda", torch.float16).contiguous()
+        tensors[f"{name}.packed"] = kernels.pack(weight, group).cpu()
+        tensors[f"{name}.scales"] = kernels.scale(weight, group).cpu()
+
+    tensors["embed_tokens.weight"] = keep(language.embed_tokens.weight)
+    tensors["norm.weight"] = keep(language.norm.weight)
+    for index, layer in enumerate(language.layers):
+        prefix = f"layers.{index}"
+        attn = layer.self_attn
+        tensors[f"{prefix}.input_layernorm.weight"] = keep(layer.input_layernorm.weight)
+        tensors[f"{prefix}.post_attention_layernorm.weight"] = keep(
+            layer.post_attention_layernorm.weight
+        )
+        tensors[f"{prefix}.q_norm.weight"] = keep(attn.q_norm.weight)
+        tensors[f"{prefix}.k_norm.weight"] = keep(attn.k_norm.weight)
+        pack(
+            f"{prefix}.qkv",
+            torch.cat([attn.q_proj.weight, attn.k_proj.weight, attn.v_proj.weight], 0),
+        )
+        pack(f"{prefix}.o", attn.o_proj.weight)
+        pack(f"{prefix}.gu", torch.cat([layer.mlp.gate_proj.weight, layer.mlp.up_proj.weight], 0))
+        pack(f"{prefix}.down", layer.mlp.down_proj.weight)
+    pack("lm_head", model.lm_head.weight)
+    del model
+    torch.cuda.empty_cache()
+
+    save_file(tensors, str(target / "model.safetensors"))
+    del tensors
+    source = Path(model_id)
+    for name in COPIED_FILES:
+        candidate = source / name
+        if candidate.is_file():
+            shutil.copy2(candidate, target / name)
+    (target / "packed_config.json").write_text(
+        json.dumps(
+            {"format": PACKED_FORMAT, "version": 1, "group": group, "layout": PACKED_LAYOUT},
+            indent=2,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    return {
+        "output": str(target),
+        "group": group,
+        "sizeMb": round(sum(p.stat().st_size for p in target.iterdir()) / 2**20, 1),
+    }
 
 
 class _RMSNorm:
@@ -40,6 +151,16 @@ class _PackedLinear:
         self.fp16 = weight if keep_fp16 else None
         self.packed = None if keep_fp16 else extension().pack(weight, group)
         self.scales = None if keep_fp16 else extension().scale(weight, group)
+
+    @classmethod
+    def from_packed(cls, packed: Tensor, scales: Tensor) -> "_PackedLinear":
+        """Build from a checkpoint that already holds INT4 nibbles and scales."""
+        linear = cls.__new__(cls)
+        linear.out_features = int(packed.shape[0])
+        linear.fp16 = None
+        linear.packed = packed.to(device="cuda").contiguous()
+        linear.scales = scales.to(device="cuda", dtype=torch.float16).contiguous()
+        return linear
 
     def __call__(self, x: Tensor, residual: Tensor | None = None) -> Tensor:
         if self.packed is None:
@@ -138,7 +259,7 @@ class W4A16ASRDecoder:
         self.capacity = 0
         self.group = group
         self.keep_fp16 = set(keep_fp16)
-        config = AutoConfig.from_pretrained(str(model_id), local_files_only=True)
+        config = AutoConfig.from_pretrained(str(model_id))
         text = getattr(config, "text_config", config)
 
         self.layers = text.num_hidden_layers
@@ -153,30 +274,68 @@ class W4A16ASRDecoder:
         rope = getattr(text, "rope_parameters", None) or getattr(text, "rope_scaling", None) or {}
         self.rope_theta = rope.get("rope_theta", getattr(text, "rope_theta", 1000000.0))
 
-        model = AutoModelForMultimodalLM.from_pretrained(
-            str(model_id), dtype=torch.float16, device_map="cpu", low_cpu_mem_usage=True
-        )
-        language = model.model.language_model
         cuda = torch.device("cuda")
-
-        self.embed = language.embed_tokens.weight.detach().to(cuda, torch.float16).contiguous()
-        self.lm_head = _PackedLinear(model.lm_head.weight, group)
-        self.final_norm = _RMSNorm(language.norm.weight, self.eps)
-
+        packed = resolve_packed(str(model_id))
+        descriptor = packed[0] if packed else None
         self.qkv, self.o_proj, self.gu, self.down = [], [], [], []
         self.q_norm, self.k_norm = [], []
         self.in_norm, self.post_norm = [], []
-        for layer in language.layers:
-            attn = layer.self_attn
-            self.qkv.append(_PackedLinear(torch.cat([attn.q_proj.weight, attn.k_proj.weight, attn.v_proj.weight], 0), group, "qkv" in self.keep_fp16))
-            self.o_proj.append(_PackedLinear(attn.o_proj.weight, group, "o" in self.keep_fp16))
-            self.gu.append(_PackedLinear(torch.cat([layer.mlp.gate_proj.weight, layer.mlp.up_proj.weight], 0), group, "gu" in self.keep_fp16))
-            self.down.append(_PackedLinear(layer.mlp.down_proj.weight, group, "down" in self.keep_fp16))
-            self.q_norm.append(_RMSNorm(attn.q_norm.weight, self.eps))
-            self.k_norm.append(_RMSNorm(attn.k_norm.weight, self.eps))
-            self.in_norm.append(_RMSNorm(layer.input_layernorm.weight, self.eps))
-            self.post_norm.append(_RMSNorm(layer.post_attention_layernorm.weight, self.eps))
-        del model
+
+        if descriptor is not None:
+            # A decoder-only checkpoint: INT4 nibbles and scales already on disk,
+            # no audio tower and no FP16 weights.
+            if self.keep_fp16:
+                raise ValueError("keep_fp16 cannot be used with a packed checkpoint")
+            if group != descriptor["group"]:
+                raise ValueError(
+                    f"this checkpoint is packed with group {descriptor['group']}, not {group}"
+                )
+            from safetensors.torch import load_file
+
+            data = load_file(str(packed[1]))
+            self.embed = data["embed_tokens.weight"].to(cuda, torch.float16).contiguous()
+            self.lm_head = _PackedLinear.from_packed(data["lm_head.packed"], data["lm_head.scales"])
+            self.final_norm = _RMSNorm(data["norm.weight"], self.eps)
+            for index in range(self.layers):
+                prefix = f"layers.{index}"
+                self.qkv.append(
+                    _PackedLinear.from_packed(data[f"{prefix}.qkv.packed"], data[f"{prefix}.qkv.scales"])
+                )
+                self.o_proj.append(
+                    _PackedLinear.from_packed(data[f"{prefix}.o.packed"], data[f"{prefix}.o.scales"])
+                )
+                self.gu.append(
+                    _PackedLinear.from_packed(data[f"{prefix}.gu.packed"], data[f"{prefix}.gu.scales"])
+                )
+                self.down.append(
+                    _PackedLinear.from_packed(data[f"{prefix}.down.packed"], data[f"{prefix}.down.scales"])
+                )
+                self.q_norm.append(_RMSNorm(data[f"{prefix}.q_norm.weight"], self.eps))
+                self.k_norm.append(_RMSNorm(data[f"{prefix}.k_norm.weight"], self.eps))
+                self.in_norm.append(_RMSNorm(data[f"{prefix}.input_layernorm.weight"], self.eps))
+                self.post_norm.append(_RMSNorm(data[f"{prefix}.post_attention_layernorm.weight"], self.eps))
+            del data
+        else:
+            model = AutoModelForMultimodalLM.from_pretrained(
+                str(model_id), dtype=torch.float16, device_map="cpu", low_cpu_mem_usage=True
+            )
+            language = model.model.language_model
+
+            self.embed = language.embed_tokens.weight.detach().to(cuda, torch.float16).contiguous()
+            self.lm_head = _PackedLinear(model.lm_head.weight, group)
+            self.final_norm = _RMSNorm(language.norm.weight, self.eps)
+
+            for layer in language.layers:
+                attn = layer.self_attn
+                self.qkv.append(_PackedLinear(torch.cat([attn.q_proj.weight, attn.k_proj.weight, attn.v_proj.weight], 0), group, "qkv" in self.keep_fp16))
+                self.o_proj.append(_PackedLinear(attn.o_proj.weight, group, "o" in self.keep_fp16))
+                self.gu.append(_PackedLinear(torch.cat([layer.mlp.gate_proj.weight, layer.mlp.up_proj.weight], 0), group, "gu" in self.keep_fp16))
+                self.down.append(_PackedLinear(layer.mlp.down_proj.weight, group, "down" in self.keep_fp16))
+                self.q_norm.append(_RMSNorm(attn.q_norm.weight, self.eps))
+                self.k_norm.append(_RMSNorm(attn.k_norm.weight, self.eps))
+                self.in_norm.append(_RMSNorm(layer.input_layernorm.weight, self.eps))
+                self.post_norm.append(_RMSNorm(layer.post_attention_layernorm.weight, self.eps))
+            del model
 
         inv_freq = 1.0 / (
             self.rope_theta ** (torch.arange(0, self.head_dim, 2, dtype=torch.float32) / self.head_dim)

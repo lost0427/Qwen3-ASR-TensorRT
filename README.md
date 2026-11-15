@@ -30,11 +30,13 @@ Published model files:
 - [1.7B EXL3 3 bpw, recalibrated with train-clean-100](https://huggingface.co/Retrieve0/Qwen3-ASR-1.7B-EXL3-Decoder/tree/main/decoder-exl3-3bpw-train-clean-100) (separate directory in the same decoder repository)
 - [1.7B EXL3 4 bpw, recalibrated with train-clean-100](https://huggingface.co/Retrieve0/Qwen3-ASR-1.7B-EXL3-Decoder/tree/main/decoder-exl3-4bpw-train-clean-100) (separate directory in the same decoder repository)
 - [1.7B W4A16 decoder, AWQ group 32](https://huggingface.co/Retrieve0/Qwen3-ASR-1.7B-W4A16-Decoder)
+- [1.7B W4A16 decoder, packed INT4, group 32](https://huggingface.co/Retrieve0/Qwen3-ASR-1.7B-W4A16-Decoder-INT4) (smaller download, decoder only)
 - [0.6B TensorRT encoder: BF16 and FP16 ONNX](https://huggingface.co/Retrieve0/Qwen3-ASR-0.6B-TensorRT-Encoder)
 - [0.6B EXL3 decoder: legacy 3 bpw and 4 bpw](https://huggingface.co/Retrieve0/Qwen3-ASR-0.6B-EXL3-Decoder)
 - [0.6B EXL3 3 bpw, recalibrated with train-clean-100](https://huggingface.co/Retrieve0/Qwen3-ASR-0.6B-EXL3-Decoder/tree/main/decoder-exl3-3bpw-train-clean-100) (separate directory in the same decoder repository)
 - [0.6B EXL3 4 bpw, recalibrated with train-clean-100](https://huggingface.co/Retrieve0/Qwen3-ASR-0.6B-EXL3-Decoder/tree/main/decoder-exl3-4bpw-train-clean-100) (separate directory in the same decoder repository)
 - [0.6B W4A16 decoder, AWQ group 32](https://huggingface.co/Retrieve0/Qwen3-ASR-0.6B-W4A16-Decoder)
+- [0.6B W4A16 decoder, packed INT4, group 32](https://huggingface.co/Retrieve0/Qwen3-ASR-0.6B-W4A16-Decoder-INT4) (smaller download, decoder only)
 - [Qwen3-ForcedAligner 0.6B TensorRT encoder](https://huggingface.co/Retrieve0/Qwen3-ForcedAligner-0.6B-TensorRT-Encoder)
 - [Qwen3-ForcedAligner 0.6B EXL3 4 bpw decoder](https://huggingface.co/Retrieve0/Qwen3-ForcedAligner-0.6B-EXL3-Decoder)
 
@@ -118,6 +120,19 @@ uv run qwen3-asr --model .\models\Qwen3-ASR-1.7B-hf-awq32 transcribe .\audio.wav
 
 A prompt longer than the profile raises an error naming the value to rebuild with instead of being truncated.
 
+#### Packed INT4 decoder
+
+`pack-decoder` writes a decoder-only checkpoint: the projections already hold INT4 nibbles plus one FP16 scale per 32 values, `embed_tokens` and the norms stay FP16, and the audio tower is not written because the TensorRT encoder replaces it. The runtime detects `packed_config.json` and loads the tensors as they are, so no FP16 weights are needed at run time.
+
+```powershell
+uv run qwen3-asr --model .\models\Qwen3-ASR-1.7B-hf-awq32 pack-decoder --group 32 --output-dir artifacts\qwen3-asr-1.7b\decoder-int4
+uv run qwen3-asr --model artifacts\qwen3-asr-1.7b\decoder-int4 transcribe .\audio.wav --backend tensorrt-w4a16 `
+  --engine artifacts\qwen3-asr-1.7b\encoder-window.bf16.engine `
+  --decoder-engine artifacts\qwen3-asr-1.7b\decoder-prefill\asr-prefill.fp16.engine
+```
+
+The packed directory is 628 MB for 0.6B and 1528 MB for 1.7B, against 1492 MB and 3887 MB for the FP16 checkpoints. The nibbles come from the same kernel that packs at load time, so a packed checkpoint reproduces the FP16 path bit for bit. `--group` is fixed in the file; asking the loader for another value raises an error. The published repositories work directly as `--model Retrieve0/Qwen3-ASR-1.7B-W4A16-Decoder-INT4`.
+
 #### Decoder parameters
 
 Runtime flags, shared by `transcribe`, `benchmark` and `serve`:
@@ -125,7 +140,7 @@ Runtime flags, shared by `transcribe`, `benchmark` and `serve`:
 | Flag | Backend | Default | Effect |
 | --- | --- | ---: | --- |
 | `--max-cache` | `tensorrt-w4a16` | 4096 | Ceiling on the KV cache, not a reservation. The decoder allocates what each request needs — prompt plus `--max-new-tokens`, rounded up to 256 slots — and grows in place when a longer request arrives, so a 30 s file uses 768 slots (84 MB) and a 145 s file grows to 2560 (280 MB). Both sizes spend 112 KB per slot (28 layers × 8 KV heads × 128 × 2 values × FP16), so 4096 slots is 448 MB and about 5.2 minutes of audio. |
-| `--group` | `tensorrt-w4a16` | 32 | Packing granularity of the INT4 kernels. The checkpoint ships as FP16 and is packed at load time, so `64` also runs, but it is coarser: on 0.6B it measured 0.16 points worse WER than 32. All published numbers use 32. |
+| `--group` | `tensorrt-w4a16` | 32 | Packing granularity of the INT4 kernels: one FP16 scale per 32 or per 64 weights. The FP16 checkpoint is packed at load time, so `64` also runs, but it is coarser — on 0.6B it measured 0.16 points worse WER than 32. A packed checkpoint fixes the value in `packed_config.json`. |
 | `--decoder-engine` | `tensorrt-w4a16` | `artifacts/<model>/decoder-prefill/asr-prefill.fp16.engine` | Prefill engine. Engines that emit `logits` and engines that emit the normed `hidden` both load. |
 | `--max-context-tokens` | `tensorrt-exllama` | 8192 | KV budget of the EXL3 path. |
 | `--engine` | all TensorRT backends | `artifacts/<model>/encoder-window.bf16.engine` | Audio encoder engine. |
@@ -244,6 +259,28 @@ curl.exe -X POST "http://127.0.0.1:8000/v1/transcribe?language=Chinese" `
 ```
 
 The API binds to loopback by default and accepts WAV, MP3, FLAC, OGG, M4A, and AAC uploads.
+
+## Disk budget
+
+Inference needs the Python environment plus one encoder engine and one decoder artifact. Measured on this machine, in GB of 1024 MB:
+
+| Backend | 0.6B | 1.7B |
+| --- | ---: | ---: |
+| `tensorrt-w4a16`, FP16 checkpoint | 14.8 | 19.1 |
+| `tensorrt-w4a16`, packed INT4 decoder | 14.0 | 16.7 |
+| `tensorrt-exllama` | 12.9 | 14.0 |
+
+The environment is 11.9 GB of every figure: torch 4.2 GB, `tensorrt_libs` 3.2 GB, the CUDA runtime libraries 3.2 GB, and 0.6 GB of `onnxruntime`, `triton` and `scipy` that only the quantization and ONNX paths use.
+
+| Artifact | 0.6B | 1.7B |
+| --- | ---: | ---: |
+| encoder engine | 359 MB | 610 MB |
+| prefill engine | 1142 MB | 2694 MB |
+| FP16 checkpoint | 1492 MB | 3887 MB |
+| packed decoder | 628 MB | 1528 MB |
+| EXL3 4 bpw decoder | 631 MB | 1502 MB |
+
+The EXL3 backend needs no prefill engine and no FP16 weights, only the tokenizer and preprocessor files. Engines are built locally for the target GPU, so they cannot be downloaded; the ONNX files they are built from are not read at run time and can be deleted afterwards.
 
 ## Benchmarks
 

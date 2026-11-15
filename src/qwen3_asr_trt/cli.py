@@ -128,6 +128,10 @@ def main() -> None:
     build_decoder.add_argument("--workspace-gib", type=int, default=1)
     build_decoder.add_argument("--keep-lm-head", action="store_true")
 
+    pack_decoder_parser = commands.add_parser("pack-decoder")
+    pack_decoder_parser.add_argument("--output-dir", type=Path)
+    pack_decoder_parser.add_argument("--group", type=int, choices=(32, 64), default=32)
+
     build = commands.add_parser("build")
     build.add_argument("--output-dir", type=Path)
     build.add_argument("--workspace-gib", type=int, default=2)
@@ -183,6 +187,8 @@ def main() -> None:
         args.output_onnx = args.output_onnx or artifact_dir / "encoder-window.int4.onnx"
     elif args.command == "build-decoder-prefill":
         args.output_dir = args.output_dir or artifact_dir / "decoder-prefill"
+    elif args.command == "pack-decoder":
+        args.output_dir = args.output_dir or artifact_dir / "decoder-int4"
     elif args.command == "align":
         aligner_dir = _artifact_dir(args.aligner_model)
         args.decoder_dir = args.decoder_dir or aligner_dir / "decoder-exl3-4bpw"
@@ -344,6 +350,15 @@ def main() -> None:
         from .encoder_quantization import quantize_encoder_int4
 
         report = quantize_encoder_int4(args.input_onnx, args.output_onnx)
+        print(json.dumps(report, ensure_ascii=False))
+        return
+
+    if args.command == "pack-decoder":
+        from .w4a16_decoder import pack_decoder
+
+        started = time.perf_counter()
+        report = pack_decoder(args.model, args.output_dir, group=args.group)
+        report["elapsedSeconds"] = round(time.perf_counter() - started, 1)
         print(json.dumps(report, ensure_ascii=False))
         return
 
