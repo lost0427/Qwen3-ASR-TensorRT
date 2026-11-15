@@ -7,3 +7,8 @@ dist/
 /artifacts/
 /models/
 /qwen3-asr.spec
+
+native/deps/
+native/build/
+native/assets/
+
