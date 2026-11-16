@@ -22,10 +22,11 @@ character for character:
 
 | Model | 100 test-clean utterances | Identical transcripts | Median per utterance |
 | --- | --- | --- | --- |
-| 0.6B | WER 1.6624% (same as Python) | 86 / 100 | 84 ms |
+| 0.6B | WER 1.6624% (same as Python) | 85 / 100 | 84 ms |
 | 1.7B | WER 1.1083% (same as Python) | 93 / 100 | 189 ms |
 
-The remaining differences are punctuation and borderline words: the GPU mel
+The CPU and GPU mel paths give identical transcripts to each other (100/100 on the same set).
+The remaining differences against Python are punctuation and borderline words: the GPU mel
 kernel differs from `WhisperFeatureExtractor` by about 1e-5 because it
 accumulates the DFT in a different order, and a handful of positions are that
 close. Every stage up to the decode loop reproduces Python bit for bit when fed
