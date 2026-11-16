@@ -18,6 +18,10 @@ foreach ($file in $listing | Where-Object { $_.name -like "*.h" }) {
 }
 Write-Host ("headers: " + (Get-ChildItem $include -Filter *.h).Count)
 
+Write-Host "downloading pocketfft"
+Invoke-WebRequest -Uri "https://raw.githubusercontent.com/mreineck/pocketfft/cpp/pocketfft_hdronly.h" `
+  -OutFile (Join-Path $include "pocketfft_hdronly.h")
+
 $dll = Join-Path $PythonSite "tensorrt_libs\nvinfer_11.dll"
 if (-not (Test-Path $dll)) { throw "nvinfer_11.dll not found in $PythonSite" }
 

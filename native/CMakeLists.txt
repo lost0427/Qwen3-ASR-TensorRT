@@ -18,6 +18,9 @@ add_executable(qwen3-asr-native
   src/audio.cpp
   src/decoder.cpp
   src/ops.cu
+  src/mel_cpu.cpp
+  src/mel_device.cpp
+  src/mel_gpu.cu
   ../csrc/w4a16_kernel.cu
   ../csrc/decode_attention.cu
   ../csrc/decode_fusions.cu
@@ -28,7 +31,8 @@ target_link_libraries(qwen3-asr-native PRIVATE "${TENSORRT_ROOT}/lib/nvinfer_11.
 
 if (MSVC)
   target_compile_options(qwen3-asr-native PRIVATE
-    $<$<COMPILE_LANGUAGE:CXX>:/utf-8> $<$<COMPILE_LANGUAGE:CXX>:/EHsc>)
+    $<$<COMPILE_LANGUAGE:CXX>:/utf-8> $<$<COMPILE_LANGUAGE:CXX>:/EHsc>
+    $<$<COMPILE_LANGUAGE:CXX>:/arch:AVX2>)
 endif()
 
 # TensorRT, libsndfile and cudart have to sit next to the executable.

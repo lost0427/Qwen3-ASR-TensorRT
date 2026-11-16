@@ -3,6 +3,7 @@
 #include <cuda_fp16.h>
 #include <cuda_runtime.h>
 
+#include <algorithm>
 #include <cmath>
 #include <cstdlib>
 #include <cstdio>
@@ -33,6 +34,10 @@ void embed_launch(void* out, const void* table, const void* ids, int count, int 
 void scatter_audio_launch(void* out, const void* audio, int first, int audio_count, int hidden,
                           cudaStream_t stream);
 void argmax_launch(const void* logits, int n, void* out, cudaStream_t stream);
+void commit_token_launch(const void* token, void* produced, void* generated, void* position,
+                         cudaStream_t stream);
+void gather_row_launch(const void* table, const void* position, void* out, int head_dim,
+                       cudaStream_t stream);
 
 namespace qasr {
 
@@ -207,9 +212,12 @@ Decoder::~Decoder() {
   free_ptr(sin_table_);
   for (void** pointer : {&hidden_, &normed_, &qkv_buf_, &attended_, &gate_up_, &gated_, &logits_,
                          &token_dev_, &pos_dev_, &ids_dev_, &prompt_dev_, &prefill_head_, &prefill_k_,
-                         &prefill_v_}) {
+                         &prefill_v_, &produced_dev_, &generated_dev_, &cos_row_dev_, &sin_row_dev_}) {
     free_ptr(*pointer);
   }
+  if (stream_) cudaStreamDestroy(static_cast<cudaStream_t>(stream_));
+  if (graph_exec_) cudaGraphExecDestroy(static_cast<cudaGraphExec_t>(graph_exec_));
+  if (graph_) cudaGraphDestroy(static_cast<cudaGraph_t>(graph_));
 }
 
 void Decoder::load_weights(const std::string& directory) {
@@ -293,27 +301,41 @@ void Decoder::allocate_cache(int capacity) {
   cuda_check(cudaMalloc(&logits_, config_.vocab * 2), "cudaMalloc logits");
   cuda_check(cudaMalloc(&token_dev_, sizeof(int)), "cudaMalloc token");
   cuda_check(cudaMalloc(&pos_dev_, sizeof(int64_t)), "cudaMalloc pos");
+  cuda_check(cudaStreamCreate(reinterpret_cast<cudaStream_t*>(&stream_)), "cudaStreamCreate");
+  cuda_check(cudaMalloc(&cos_row_dev_, static_cast<size_t>(head_dim) * 2), "cudaMalloc cos row");
+  cuda_check(cudaMalloc(&sin_row_dev_, static_cast<size_t>(head_dim) * 2), "cudaMalloc sin row");
+  cuda_check(cudaMalloc(&produced_dev_, static_cast<size_t>(capacity) * sizeof(int)), "cudaMalloc produced");
+  cuda_check(cudaMalloc(&generated_dev_, sizeof(int)), "cudaMalloc generated");
 }
 
 int Decoder::prefill(Engine& engine, const std::vector<int32_t>& ids, const void* audio, int audio_count,
                      int first_audio) {
   const int seq = static_cast<int>(ids.size());
   const int hidden = config_.hidden;
-  prefill_seq_ = seq;
-  if (!prompt_dev_) {
+  const int kv_dim = config_.kv_heads * config_.head_dim;
+  if (seq > prefill_seq_) {
+    // Buffers sized for an earlier, shorter prompt have to grow.
+    if (prompt_dev_) cudaFree(prompt_dev_);
+    if (ids_dev_) cudaFree(ids_dev_);
+    if (prefill_k_) cudaFree(prefill_k_);
+    if (prefill_v_) cudaFree(prefill_v_);
+    prompt_dev_ = nullptr;
+    ids_dev_ = nullptr;
+    prefill_k_ = nullptr;
+    prefill_v_ = nullptr;
     cuda_check(cudaMalloc(&prompt_dev_, static_cast<size_t>(seq) * hidden * 2), "cudaMalloc prompt");
+    cuda_check(cudaMalloc(&ids_dev_, static_cast<size_t>(seq) * sizeof(int)), "cudaMalloc ids");
+    const size_t cache_bytes = static_cast<size_t>(seq) * config_.layers * kv_dim * 2;
+    cuda_check(cudaMalloc(&prefill_k_, cache_bytes), "cudaMalloc prefill cache");
+    cuda_check(cudaMalloc(&prefill_v_, cache_bytes), "cudaMalloc prefill cache");
+    prefill_seq_ = seq;
   }
-  if (!ids_dev_) cuda_check(cudaMalloc(&ids_dev_, static_cast<size_t>(seq) * sizeof(int)), "cudaMalloc ids");
   cuda_check(cudaMemcpy(ids_dev_, ids.data(), seq * sizeof(int), cudaMemcpyHostToDevice), "copy ids");
   embed_launch(prompt_dev_, embed_, ids_dev_, seq, hidden, nullptr);
   if (audio_count > 0) {
     scatter_audio_launch(prompt_dev_, audio, first_audio, audio_count, hidden, nullptr);
   }
 
-  const int kv_dim = config_.kv_heads * config_.head_dim;
-  const size_t cache_bytes = static_cast<size_t>(seq) * config_.layers * kv_dim * 2;
-  if (!prefill_k_) cuda_check(cudaMalloc(&prefill_k_, cache_bytes), "cudaMalloc prefill cache");
-  if (!prefill_v_) cuda_check(cudaMalloc(&prefill_v_, cache_bytes), "cudaMalloc prefill cache");
   const bool emits_logits = [&] {
     for (int i = 0; i < engine.num_io(); ++i)
       if (std::strcmp(engine.name(i), "logits") == 0) return true;
@@ -387,10 +409,16 @@ int Decoder::prefill(Engine& engine, const std::vector<int32_t>& ids, const void
   argmax_launch(logits_, config_.vocab, token_dev_, nullptr);
   cuda_check(cudaMemcpy(&token, token_dev_, sizeof(int), cudaMemcpyDeviceToHost), "copy token");
   position_ = seq;
+  const int64_t position64 = position_;
+  cuda_check(cudaMemcpy(pos_dev_, &position64, sizeof(int64_t), cudaMemcpyHostToDevice), "copy position");
+  const int produced_first = token;
+  const int generated_one = 1;
+  cuda_check(cudaMemcpy(produced_dev_, &produced_first, sizeof(int), cudaMemcpyHostToDevice), "copy token");
+  cuda_check(cudaMemcpy(generated_dev_, &generated_one, sizeof(int), cudaMemcpyHostToDevice), "copy count");
   return token;
 }
 
-int Decoder::step() {
+void Decoder::enqueue_step() {
   const int hidden = config_.hidden;
   const int head_dim = config_.head_dim;
   const int q_dim = config_.heads * head_dim;
@@ -399,12 +427,15 @@ int Decoder::step() {
 
   // The cache and attention kernels read the position as int64.
   const int64_t position64 = position_;
-  cuda_check(cudaMemcpy(pos_dev_, &position64, sizeof(int64_t), cudaMemcpyHostToDevice), "copy position");
-  const void* cos_row = static_cast<const __half*>(cos_table_) + static_cast<size_t>(position_) * head_dim;
-  const void* sin_row = static_cast<const __half*>(sin_table_) + static_cast<size_t>(position_) * head_dim;
+  // The position lives on the device so the whole step can be graph-captured;
+  // the rotary row for the current position is gathered into a fixed buffer.
+  gather_row_launch(cos_table_, pos_dev_, cos_row_dev_, head_dim, static_cast<cudaStream_t>(stream_));
+  gather_row_launch(sin_table_, pos_dev_, sin_row_dev_, head_dim, static_cast<cudaStream_t>(stream_));
+  const void* cos_row = cos_row_dev_;
+  const void* sin_row = sin_row_dev_;
 
   __half* hidden_buffer = static_cast<__half*>(hidden_);
-  embed_launch(hidden_buffer, embed_, token_dev_, 1, hidden, nullptr);
+  embed_launch(hidden_buffer, embed_, token_dev_, 1, hidden, static_cast<cudaStream_t>(stream_));
   if (std::getenv("QASR_DEBUG")) {
     std::vector<__half> host(static_cast<size_t>(hidden));
     cuda_check(cudaMemcpy(host.data(), hidden_buffer, host.size() * 2, cudaMemcpyDeviceToHost), "dbg hidden");
@@ -412,22 +443,22 @@ int Decoder::step() {
   }
   for (int layer = 0; layer < config_.layers; ++layer) {
     const bool trace = std::getenv("QASR_DEBUG") && layer == 0;
-    rmsnorm_launch(hidden_buffer, in_norm_[layer].weight, normed_, hidden, config_.eps, nullptr);
+    rmsnorm_launch(hidden_buffer, in_norm_[layer].weight, normed_, hidden, config_.eps, static_cast<cudaStream_t>(stream_));
     if (trace) debug_dump("normed", normed_, 2);
     w4a16_gemv_launch(normed_, qkv_[layer].packed, qkv_[layer].scales, qkv_buf_,
-                      qkv_[layer].rows, hidden, 32, nullptr);
+                      qkv_[layer].rows, hidden, 32, static_cast<cudaStream_t>(stream_));
     if (trace) debug_dump("qkv", qkv_buf_, 2);
     auto* qkv = static_cast<__half*>(qkv_buf_);
     __half* q = qkv;
     __half* k = qkv + q_dim;
     __half* v = qkv + q_dim + kv_dim;
-    qk_norm_rope_launch(q, q_norm_[layer].weight, cos_row, sin_row, config_.heads, head_dim, config_.eps, nullptr);
+    qk_norm_rope_launch(q, q_norm_[layer].weight, cos_row, sin_row, config_.heads, head_dim, config_.eps, static_cast<cudaStream_t>(stream_));
     qk_norm_rope_launch(k, k_norm_[layer].weight, cos_row, sin_row, config_.kv_heads, head_dim, config_.eps,
-                        nullptr);
+                        static_cast<cudaStream_t>(stream_));
     if (trace) debug_dump("q_rope", q, 2);
-    cache_write_launch(cache_k_[layer], cache_v_[layer], k, v, pos_dev_, kv_dim, head_dim, capacity_, nullptr);
+    cache_write_launch(cache_k_[layer], cache_v_[layer], k, v, pos_dev_, kv_dim, head_dim, capacity_, static_cast<cudaStream_t>(stream_));
     decode_attention_launch(q, cache_k_[layer], cache_v_[layer], pos_dev_, attended_, config_.heads, head_dim,
-                            capacity_, groups, nullptr);
+                            capacity_, groups, static_cast<cudaStream_t>(stream_));
     if (trace) {
       debug_dump("attended", attended_, 2);
       debug_dump("cache_row", static_cast<const __half*>(cache_k_[layer]) +
@@ -437,42 +468,96 @@ int Decoder::step() {
     }
     // Residual overload: (x, packed, scales, residual, y, rows, k, group, stream).
     w4a16_gemv_launch(attended_, o_proj_[layer].packed, o_proj_[layer].scales, hidden_buffer,
-                      hidden_buffer, hidden, q_dim, 32, nullptr);
+                      hidden_buffer, hidden, q_dim, 32, static_cast<cudaStream_t>(stream_));
     if (std::getenv("QASR_DEBUG") && layer == 0) {
       std::vector<__half> host(static_cast<size_t>(hidden));
       cuda_check(cudaMemcpy(host.data(), hidden_buffer, host.size() * 2, cudaMemcpyDeviceToHost), "dbg attn");
       std::fprintf(stderr, "[dbg] after-attn %.4f %.4f\n", __half2float(host[0]), __half2float(host[1]));
     }
-    rmsnorm_launch(hidden_buffer, post_norm_[layer].weight, normed_, hidden, config_.eps, nullptr);
+    rmsnorm_launch(hidden_buffer, post_norm_[layer].weight, normed_, hidden, config_.eps, static_cast<cudaStream_t>(stream_));
     w4a16_gemv_launch(normed_, gu_[layer].packed, gu_[layer].scales, gate_up_, gu_[layer].rows, hidden, 32,
-                      nullptr);
-    silu_mul_launch(gate_up_, gated_, config_.intermediate, nullptr);
+                      static_cast<cudaStream_t>(stream_));
+    silu_mul_launch(gate_up_, gated_, config_.intermediate, static_cast<cudaStream_t>(stream_));
     w4a16_gemv_launch(gated_, down_[layer].packed, down_[layer].scales, hidden_buffer, hidden_buffer,
-                      hidden, config_.intermediate, 32, nullptr);
+                      hidden, config_.intermediate, 32, static_cast<cudaStream_t>(stream_));
   }
-  rmsnorm_launch(hidden_buffer, final_norm_.weight, normed_, hidden, config_.eps, nullptr);
-  w4a16_gemv_launch(normed_, lm_head_.packed, lm_head_.scales, logits_, config_.vocab, hidden, 32, nullptr);
-  argmax_launch(logits_, config_.vocab, token_dev_, nullptr);
-  int token = 0;
-  cuda_check(cudaMemcpy(&token, token_dev_, sizeof(int), cudaMemcpyDeviceToHost), "copy token");
-  if (std::getenv("QASR_DEBUG")) {
-    std::vector<__half> host(static_cast<size_t>(config_.vocab));
-    cuda_check(cudaMemcpy(host.data(), logits_, host.size() * 2, cudaMemcpyDeviceToHost), "copy logits");
-    float best = -1e30f, second = -1e30f;
-    for (const __half value : host) {
-      const float v = __half2float(value);
-      if (v > best) {
-        second = best;
-        best = v;
-      } else if (v > second) {
-        second = v;
-      }
+  rmsnorm_launch(hidden_buffer, final_norm_.weight, normed_, hidden, config_.eps, static_cast<cudaStream_t>(stream_));
+  w4a16_gemv_launch(normed_, lm_head_.packed, lm_head_.scales, logits_, config_.vocab, hidden, 32, static_cast<cudaStream_t>(stream_));
+  argmax_launch(logits_, config_.vocab, token_dev_, static_cast<cudaStream_t>(stream_));
+  commit_token_launch(token_dev_, produced_dev_, generated_dev_, pos_dev_, static_cast<cudaStream_t>(stream_));
+}
+
+void Decoder::capture() {
+  if (graph_exec_) return;
+  // The warm-up and the capture both execute the step, so save the decoder state
+  // and roll it back afterwards. Cache rows written at the scratch positions are
+  // overwritten by the real decode.
+  int64_t saved_position = 0;
+  int saved_generated = 0;
+  int saved_first = 0;
+  int saved_token = 0;
+  cuda_check(cudaMemcpy(&saved_position, pos_dev_, sizeof(int64_t), cudaMemcpyDeviceToHost), "save position");
+  cuda_check(cudaMemcpy(&saved_generated, generated_dev_, sizeof(int), cudaMemcpyDeviceToHost),
+             "save count");
+  cuda_check(cudaMemcpy(&saved_first, produced_dev_, sizeof(int), cudaMemcpyDeviceToHost), "save token");
+  cuda_check(cudaMemcpy(&saved_token, token_dev_, sizeof(int), cudaMemcpyDeviceToHost), "save input token");
+
+  cudaStream_t stream = static_cast<cudaStream_t>(stream_);
+  enqueue_step();
+  cuda_check(cudaStreamSynchronize(stream), "graph warm-up");
+
+  cudaGraph_t graph = nullptr;
+  cuda_check(cudaStreamBeginCapture(stream, cudaStreamCaptureModeThreadLocal), "begin capture");
+  enqueue_step();
+  cuda_check(cudaStreamEndCapture(stream, &graph), "end capture");
+  cudaGraphExec_t exec = nullptr;
+  cuda_check(cudaGraphInstantiate(&exec, graph, nullptr, nullptr, 0), "instantiate graph");
+  graph_ = graph;
+  graph_exec_ = exec;
+
+  cuda_check(cudaMemcpy(pos_dev_, &saved_position, sizeof(int64_t), cudaMemcpyHostToDevice), "restore position");
+  cuda_check(cudaMemcpy(generated_dev_, &saved_generated, sizeof(int), cudaMemcpyHostToDevice),
+             "restore count");
+  cuda_check(cudaMemcpy(produced_dev_, &saved_first, sizeof(int), cudaMemcpyHostToDevice), "restore token");
+  // The captured step overwrites the input token, so put it back as well.
+  cuda_check(cudaMemcpy(token_dev_, &saved_token, sizeof(int), cudaMemcpyHostToDevice),
+             "restore input token");
+}
+
+std::vector<int32_t> Decoder::decode(int max_new_tokens, int chunk) {
+  capture();
+  const int64_t position_start = position_;
+  int generated = 1;
+  cuda_check(cudaMemcpy(&generated, generated_dev_, sizeof(int), cudaMemcpyDeviceToHost), "read count");
+  std::vector<int32_t> tokens(static_cast<size_t>(generated));
+  cuda_check(cudaMemcpy(tokens.data(), produced_dev_, tokens.size() * sizeof(int), cudaMemcpyDeviceToHost),
+             "read token");
+
+  const int64_t limit = static_cast<int64_t>(capacity_) - 1;
+  while (generated < max_new_tokens && (position_start + generated - 1) < limit &&
+         tokens.back() != 151643 && tokens.back() != 151645) {
+    int steps = std::min(chunk, max_new_tokens - generated);
+    const int64_t room = limit - (position_start + generated - 1);
+    if (steps > room) steps = static_cast<int>(room);
+    if (steps <= 0) break;
+    cudaGraphExec_t exec = static_cast<cudaGraphExec_t>(graph_exec_);
+    cudaStream_t stream = static_cast<cudaStream_t>(stream_);
+    for (int i = 0; i < steps; ++i) cuda_check(cudaGraphLaunch(exec, stream), "graph launch");
+    cuda_check(cudaStreamSynchronize(stream), "graph sync");
+    cuda_check(cudaMemcpy(&generated, generated_dev_, sizeof(int), cudaMemcpyDeviceToHost), "read count");
+    tokens.resize(static_cast<size_t>(generated));
+    cuda_check(cudaMemcpy(tokens.data(), produced_dev_, tokens.size() * sizeof(int), cudaMemcpyDeviceToHost),
+               "read tokens");
+    // The end token can land anywhere inside the chunk, not just at its end.
+    const auto stop = std::find_if(tokens.begin(), tokens.end(),
+                                   [](int32_t value) { return value == 151643 || value == 151645; });
+    if (stop != tokens.end()) {
+      tokens.erase(stop, tokens.end());
+      break;
     }
-    std::fprintf(stderr, "[step] pos %d token %d logits max %.4f second %.4f\n", position_, token, best,
-                 second);
   }
-  ++position_;
-  return token;
+  position_ = position_start + generated - 1;
+  return tokens;
 }
 
 }  // namespace qasr

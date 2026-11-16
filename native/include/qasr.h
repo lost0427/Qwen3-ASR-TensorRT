@@ -61,7 +61,27 @@ std::string decode_tokens(const TokenizerAssets& assets, const std::vector<int32
 std::vector<float> load_audio(const std::string& path, int& sample_rate);
 
 // Log-mel features as [n_mel][frames], frames padded to a multiple of `multiple`.
-std::vector<float> log_mel(const std::vector<float>& pcm, const MelAssets& assets,
-                           int multiple, int& frames, int& valid_frames);
+// The CPU path uses pocketfft, the library torch's CPU STFT is built on.
+void mel_forward_cpu(const float* pcm, int length, const MelAssets& assets, float* out, int frames);
+
+// The same features on the GPU: windowed DFT, mel accumulation and log in two passes.
+struct MelDeviceTables {
+  void* cos = nullptr;
+  void* sin = nullptr;
+  void* window = nullptr;
+  void* filters = nullptr;
+  MelDeviceTables() = default;
+  MelDeviceTables(const MelDeviceTables&) = delete;
+  MelDeviceTables& operator=(const MelDeviceTables&) = delete;
+  MelDeviceTables(MelDeviceTables&& other) noexcept { *this = std::move(other); }
+  MelDeviceTables& operator=(MelDeviceTables&& other) noexcept;
+  ~MelDeviceTables();
+};
+
+MelDeviceTables upload_mel_tables(const MelAssets& assets);
+void mel_forward_gpu(const float* pcm, int length, const MelDeviceTables& tables, const MelAssets& assets,
+                     float* out, int frames);
+
+int mel_frame_count(int length, int hop, int multiple, int& valid_frames);
 
 }  // namespace qasr

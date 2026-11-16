@@ -28,11 +28,14 @@ class Decoder {
   // Returns the first generated token.
   int prefill(Engine& engine, const std::vector<int32_t>& ids, const void* audio, int audio_count,
               int first_audio);
-  // One decode step; returns the token the step produced.
-  int step();
+  // Runs the decode loop on the device: the step is captured into a CUDA graph
+  // and replayed `chunk` times before the host reads the tokens back.
+  std::vector<int32_t> decode(int max_new_tokens, int chunk = 8);
 
  private:
   void allocate_cache(int capacity);
+  void enqueue_step();
+  void capture();
   void load_weights(const std::string& directory);
 
   ModelConfig config_;
@@ -70,6 +73,14 @@ class Decoder {
   void* logits_ = nullptr;
   void* token_dev_ = nullptr;
   void* pos_dev_ = nullptr;
+  void* cos_row_dev_ = nullptr;
+  void* sin_row_dev_ = nullptr;
+  void* produced_dev_ = nullptr;
+  void* generated_dev_ = nullptr;
+  void* host_scratch_ = nullptr;
+  void* stream_ = nullptr;
+  void* graph_ = nullptr;
+  void* graph_exec_ = nullptr;
   void* ids_dev_ = nullptr;
   void* prompt_dev_ = nullptr;
   void* prefill_head_ = nullptr;

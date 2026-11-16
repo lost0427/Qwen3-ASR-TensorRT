@@ -82,6 +82,22 @@ __global__ void argmax_kernel(const __half* __restrict__ logits, int n, int* __r
   if (threadIdx.x == 0) *out = indices[0];
 }
 
+// The rotary kernels take a row, so copy the row for the device position into a
+// fixed buffer: the pointer then stays constant across graph replays.
+__global__ void gather_row_kernel(const __half* __restrict__ table, const long long* __restrict__ position,
+                                  __half* __restrict__ out, int head_dim) {
+  const long long base = position[0] * head_dim;
+  for (int i = threadIdx.x; i < head_dim; i += blockDim.x) out[i] = table[base + i];
+}
+
+__global__ void commit_token_kernel(const int* __restrict__ token, int* __restrict__ produced,
+                                    int* __restrict__ generated, long long* __restrict__ position) {
+  const int index = generated[0];
+  produced[index] = token[0];
+  generated[0] = index + 1;
+  position[0] += 1;
+}
+
 }  // namespace
 
 void rmsnorm_launch(const void* x, const void* weight, void* out, int n, float eps, cudaStream_t stream) {
@@ -99,6 +115,20 @@ void scatter_audio_launch(void* out, const void* audio, int first, int audio_cou
   scatter_audio_kernel<<<audio_count, 256, 0, stream>>>(static_cast<__half*>(out),
                                                         static_cast<const __nv_bfloat16*>(audio), first,
                                                         audio_count, hidden);
+}
+
+void gather_row_launch(const void* table, const void* position, void* out, int head_dim,
+                       cudaStream_t stream) {
+  gather_row_kernel<<<1, 128, 0, stream>>>(static_cast<const __half*>(table),
+                                           static_cast<const long long*>(position),
+                                           static_cast<__half*>(out), head_dim);
+}
+
+void commit_token_launch(const void* token, void* produced, void* generated, void* position,
+                         cudaStream_t stream) {
+  commit_token_kernel<<<1, 1, 0, stream>>>(static_cast<const int*>(token), static_cast<int*>(produced),
+                                           static_cast<int*>(generated),
+                                           static_cast<long long*>(position));
 }
 
 void argmax_launch(const void* logits, int n, void* out, cudaStream_t stream) {
