@@ -137,6 +137,18 @@ size_t tensor_bytes(const TensorView& view) {
 
 }  // namespace
 
+namespace {
+
+void debug_dump(const char* label, const void* device, int count) {
+  std::vector<__half> host(static_cast<size_t>(count));
+  cudaMemcpy(host.data(), device, host.size() * 2, cudaMemcpyDeviceToHost);
+  std::fprintf(stderr, "[dbg] %s:", label);
+  for (int i = 0; i < count; ++i) std::fprintf(stderr, " %.6f", __half2float(host[i]));
+  std::fprintf(stderr, "\n");
+}
+
+}  // namespace
+
 ModelConfig read_model_config(const std::string& directory) {
   std::ifstream stream(directory + "/config.json");
   if (!stream) throw std::runtime_error("cannot open config.json in " + directory);
@@ -330,19 +342,25 @@ int Decoder::prefill(Engine& engine, const std::vector<int32_t>& ids, const void
   engine.run();
   cuda_check(cudaDeviceSynchronize(), "prefill sync");
 
+  // Source layout is (seq, layers, kv_heads, head_dim); the runtime buffer is
+  // (kv_heads, capacity, head_dim), so each head needs its own row copy.
+  const int head_dim = config_.head_dim;
+  const int kv_heads = config_.kv_heads;
+  const size_t source_pitch = static_cast<size_t>(config_.layers) * kv_dim * 2;
+  const size_t dest_pitch = static_cast<size_t>(head_dim) * 2;
   for (int layer = 0; layer < config_.layers; ++layer) {
-    cuda_check(
-        cudaMemcpy2D(cache_k_[layer], kv_dim * 2,
-                     static_cast<const uint8_t*>(prefill_k_) + static_cast<size_t>(layer) * kv_dim * 2,
-                     static_cast<size_t>(config_.layers) * kv_dim * 2, kv_dim * 2, seq,
-                     cudaMemcpyDeviceToDevice),
-        "copy cache");
-    cuda_check(
-        cudaMemcpy2D(cache_v_[layer], kv_dim * 2,
-                     static_cast<const uint8_t*>(prefill_v_) + static_cast<size_t>(layer) * kv_dim * 2,
-                     static_cast<size_t>(config_.layers) * kv_dim * 2, kv_dim * 2, seq,
-                     cudaMemcpyDeviceToDevice),
-        "copy cache");
+    for (int head = 0; head < kv_heads; ++head) {
+      const size_t source_offset = (static_cast<size_t>(layer) * kv_heads + head) * head_dim * 2;
+      const size_t dest_offset = static_cast<size_t>(head) * capacity_ * head_dim * 2;
+      cuda_check(cudaMemcpy2D(static_cast<uint8_t*>(cache_k_[layer]) + dest_offset, dest_pitch,
+                              static_cast<const uint8_t*>(prefill_k_) + source_offset, source_pitch,
+                              head_dim * 2, seq, cudaMemcpyDeviceToDevice),
+                 "copy cache k");
+      cuda_check(cudaMemcpy2D(static_cast<uint8_t*>(cache_v_[layer]) + dest_offset, dest_pitch,
+                              static_cast<const uint8_t*>(prefill_v_) + source_offset, source_pitch,
+                              head_dim * 2, seq, cudaMemcpyDeviceToDevice),
+                 "copy cache v");
+    }
   }
 
   if (const char* dump = std::getenv("QASR_DUMP")) {
@@ -393,9 +411,12 @@ int Decoder::step() {
     std::fprintf(stderr, "[dbg] embed0 %.4f embed1 %.4f\n", __half2float(host[0]), __half2float(host[1]));
   }
   for (int layer = 0; layer < config_.layers; ++layer) {
+    const bool trace = std::getenv("QASR_DEBUG") && layer == 0;
     rmsnorm_launch(hidden_buffer, in_norm_[layer].weight, normed_, hidden, config_.eps, nullptr);
+    if (trace) debug_dump("normed", normed_, 2);
     w4a16_gemv_launch(normed_, qkv_[layer].packed, qkv_[layer].scales, qkv_buf_,
                       qkv_[layer].rows, hidden, 32, nullptr);
+    if (trace) debug_dump("qkv", qkv_buf_, 2);
     auto* qkv = static_cast<__half*>(qkv_buf_);
     __half* q = qkv;
     __half* k = qkv + q_dim;
@@ -403,9 +424,17 @@ int Decoder::step() {
     qk_norm_rope_launch(q, q_norm_[layer].weight, cos_row, sin_row, config_.heads, head_dim, config_.eps, nullptr);
     qk_norm_rope_launch(k, k_norm_[layer].weight, cos_row, sin_row, config_.kv_heads, head_dim, config_.eps,
                         nullptr);
+    if (trace) debug_dump("q_rope", q, 2);
     cache_write_launch(cache_k_[layer], cache_v_[layer], k, v, pos_dev_, kv_dim, head_dim, capacity_, nullptr);
     decode_attention_launch(q, cache_k_[layer], cache_v_[layer], pos_dev_, attended_, config_.heads, head_dim,
                             capacity_, groups, nullptr);
+    if (trace) {
+      debug_dump("attended", attended_, 2);
+      debug_dump("cache_row", static_cast<const __half*>(cache_k_[layer]) +
+                                  static_cast<size_t>(position_) * head_dim, 4);
+      debug_dump("kv_head0", k, 4);
+      debug_dump("cache_row30", static_cast<const __half*>(cache_k_[layer]) + static_cast<size_t>(30) * head_dim, 4);
+    }
     // Residual overload: (x, packed, scales, residual, y, rows, k, group, stream).
     w4a16_gemv_launch(attended_, o_proj_[layer].packed, o_proj_[layer].scales, hidden_buffer,
                       hidden_buffer, hidden, q_dim, 32, nullptr);
