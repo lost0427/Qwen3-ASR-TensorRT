@@ -18,16 +18,18 @@ PyTorch.
 
 ## Verified output
 
-| Model | Same transcript as Python | Notes |
+| Model | Same transcript as Python | WER |
 | --- | --- | --- |
-| 0.6B | 19 of the first 20 test-clean utterances | one comma where Python emits an em dash |
-| 1.7B | 9 of the first 10 | one comma placement |
+| 0.6B, first 100 utterances | 90 / 100 | 1.53% against 1.66% for the Python run |
+| 1.7B, first 10 utterances | 9 / 10 | — |
 
-The remaining differences are punctuation: the mel front end differs from
-`WhisperFeatureExtractor` by up to 1.6e-5 because it computes the STFT with a
-DFT in double precision instead of torch's single-precision FFT, and for a
-handful of positions two punctuation tokens are that close. Every stage before
-the decode loop reproduces Python bit for bit when fed the same mel.
+The remaining differences are punctuation and borderline word choices: the mel
+front end differs from `WhisperFeatureExtractor` by up to 1.6e-5 because it
+computes the STFT with a DFT in double precision instead of torch's
+single-precision FFT. Every stage before the decode loop reproduces Python bit
+for bit when fed the same mel, and the decoder kernels match the Python kernels
+exactly, so the mel rounding is the only source of divergence. Bit-identical
+transcripts would require reproducing torch's FFT bit for bit.
 
 ## Build
 
