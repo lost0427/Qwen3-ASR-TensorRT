@@ -22,6 +22,45 @@ struct SndFileInfo {
   int seekable;
 };
 
+struct MemoryFile {
+  const uint8_t* data = nullptr;
+  int64_t size = 0;
+  int64_t offset = 0;
+};
+
+struct SfVirtualIo {
+  int64_t (*get_filelen)(void*);
+  int64_t (*seek)(int64_t, int, void*);
+  int64_t (*read)(void*, int64_t, void*);
+  int64_t (*write)(const void*, int64_t, void*);
+  int64_t (*tell)(void*);
+};
+
+int64_t memory_length(void* user) { return static_cast<MemoryFile*>(user)->size; }
+
+int64_t memory_seek(int64_t offset, int whence, void* user) {
+  auto* file = static_cast<MemoryFile*>(user);
+  int64_t target = offset;
+  if (whence == 1) target += file->offset;
+  if (whence == 2) target += file->size;
+  if (target < 0 || target > file->size) return -1;
+  file->offset = target;
+  return target;
+}
+
+int64_t memory_read(void* out, int64_t count, void* user) {
+  auto* file = static_cast<MemoryFile*>(user);
+  const int64_t available = file->size - file->offset;
+  if (count > available) count = available;
+  std::memcpy(out, file->data + file->offset, static_cast<size_t>(count));
+  file->offset += count;
+  return count;
+}
+
+int64_t memory_write(const void*, int64_t, void*) { return 0; }
+
+int64_t memory_tell(void* user) { return static_cast<MemoryFile*>(user)->offset; }
+
 void* open_sndfile_library() {
   const char* names[] = {"libsndfile_x64.dll", "libsndfile.dll"};
   for (const char* name : names) {
@@ -67,6 +106,47 @@ std::vector<float> load_audio(const std::string& path, int& sample_rate) {
   (void)path;
   (void)sample_rate;
   throw std::runtime_error("native audio loading is implemented for Windows only");
+#endif
+}
+
+std::vector<float> load_audio_memory(const void* data, size_t size, int& sample_rate) {
+#ifdef _WIN32
+  void* handle = open_sndfile_library();
+  if (!handle) throw std::runtime_error("libsndfile not found on PATH");
+  using OpenVirtualFn = void* (*)(SfVirtualIo*, int, SndFileInfo*, void*);
+  using ReadFn = int64_t (*)(void*, float*, int64_t);
+  using CloseFn = int (*)(void*);
+  auto open = reinterpret_cast<OpenVirtualFn>(
+      GetProcAddress(static_cast<HMODULE>(handle), "sf_open_virtual"));
+  auto read = reinterpret_cast<ReadFn>(GetProcAddress(static_cast<HMODULE>(handle), "sf_readf_float"));
+  auto close = reinterpret_cast<CloseFn>(GetProcAddress(static_cast<HMODULE>(handle), "sf_close"));
+  if (!open || !read || !close) throw std::runtime_error("libsndfile is missing symbols");
+
+  MemoryFile file{static_cast<const uint8_t*>(data), static_cast<int64_t>(size), 0};
+  SfVirtualIo io{memory_length, memory_seek, memory_read, memory_write, memory_tell};
+  SndFileInfo info{};
+  const int read_mode = 0x10;  // SFM_READ
+  void* stream = open(&io, read_mode, &info, &file);
+  if (!stream) throw std::runtime_error("cannot decode audio from memory");
+
+  std::vector<float> interleaved(static_cast<size_t>(info.frames) * info.channels);
+  const int64_t got = read(stream, interleaved.data(), info.frames);
+  close(stream);
+  sample_rate = info.samplerate;
+  if (got <= 0) throw std::runtime_error("empty audio");
+
+  std::vector<float> mono(static_cast<size_t>(got));
+  for (int64_t i = 0; i < got; ++i) {
+    float sum = 0.0f;
+    for (int c = 0; c < info.channels; ++c) sum += interleaved[i * info.channels + c];
+    mono[i] = sum / static_cast<float>(info.channels);
+  }
+  return mono;
+#else
+  (void)data;
+  (void)size;
+  (void)sample_rate;
+  throw std::runtime_error("memory audio loading is implemented for Windows only");
 #endif
 }
 

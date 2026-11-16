@@ -59,6 +59,7 @@ std::string decode_tokens(const TokenizerAssets& assets, const std::vector<int32
 
 // Reads PCM through libsndfile (loaded at run time) and returns mono float32.
 std::vector<float> load_audio(const std::string& path, int& sample_rate);
+std::vector<float> load_audio_memory(const void* data, size_t size, int& sample_rate);
 
 // Log-mel features as [n_mel][frames], frames padded to a multiple of `multiple`.
 // The CPU path uses pocketfft, the library torch's CPU STFT is built on.

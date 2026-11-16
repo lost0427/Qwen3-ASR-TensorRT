@@ -32,6 +32,10 @@ class Decoder {
   // and replayed `chunk` times before the host reads the tokens back.
   std::vector<int32_t> decode(int max_new_tokens, int chunk = 8);
 
+  // Times the pieces of a decode step so the gap against the Python runtime can
+  // be attributed instead of guessed.
+  void bench(int iterations);
+
  private:
   void allocate_cache(int capacity);
   void enqueue_step();

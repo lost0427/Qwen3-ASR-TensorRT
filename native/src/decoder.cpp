@@ -560,4 +560,36 @@ std::vector<int32_t> Decoder::decode(int max_new_tokens, int chunk) {
   return tokens;
 }
 
+void Decoder::bench(int iterations) {
+  capture();
+  cudaStream_t stream = static_cast<cudaStream_t>(stream_);
+  cudaEvent_t start = nullptr;
+  cudaEvent_t stop = nullptr;
+  cuda_check(cudaEventCreate(&start), "event");
+  cuda_check(cudaEventCreate(&stop), "event");
+  auto run = [&](const char* label, auto&& body) {
+    cuda_check(cudaStreamSynchronize(stream), "bench sync");
+    cuda_check(cudaEventRecord(start, stream), "record");
+    for (int i = 0; i < iterations; ++i) body();
+    cuda_check(cudaEventRecord(stop, stream), "record");
+    cuda_check(cudaEventSynchronize(stop), "event sync");
+    float ms = 0.0f;
+    cuda_check(cudaEventElapsedTime(&ms, start, stop), "elapsed");
+    std::fprintf(stderr, "[bench] %-22s %.3f us/iter\n", label, ms * 1000.0f / iterations);
+  };
+
+  run("argmax", [&] { argmax_launch(logits_, config_.vocab, token_dev_, stream); });
+  run("gather row x2", [&] {
+    gather_row_launch(cos_table_, pos_dev_, cos_row_dev_, config_.head_dim, stream);
+    gather_row_launch(sin_table_, pos_dev_, sin_row_dev_, config_.head_dim, stream);
+  });
+  run("commit token", [&] {
+    commit_token_launch(token_dev_, produced_dev_, generated_dev_, pos_dev_, stream);
+  });
+  run("graph replay (step)", [&] { cudaGraphLaunch(static_cast<cudaGraphExec_t>(graph_exec_), stream); });
+
+  cudaEventDestroy(start);
+  cudaEventDestroy(stop);
+}
+
 }  // namespace qasr

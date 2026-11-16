@@ -14,6 +14,7 @@ the packed INT4 decoder and tokenizer assets, and transcribes without PyTorch.
 | encoder + prefill | the published TensorRT engines |
 | decode | hand-written INT4 kernels, captured into a CUDA graph |
 | CLI | batch: one process, many files, engines loaded once |
+| HTTP API | `POST /v1/transcribe?language=...`, same protocol as the Python server |
 
 ## Verification
 
@@ -34,11 +35,16 @@ the same mel.
 
 ## Speed
 
-Per-utterance medians from the same 100-utterance batch, 0.6B: mel 1.4 ms,
-encoder 5.3 ms, prefill 13.8 ms, decode 63.6 ms. 1.7B: mel 1.4 ms, encoder
-6.9 ms, prefill 21.5 ms, decode 158.3 ms. Python's full-corpus medians are
-71.8 ms and 175.0 ms, so the two are at parity; the native runtime pays its
-engine load once per process instead of once per file.
+Per-utterance medians from the same 100-utterance batch. 0.6B: mel 1.4 ms,
+encoder 5.3 ms, prefill 13.8 ms, decode 63.6 ms, total 84 ms; the Python run on
+the same utterances is mel+load 6.3 ms, encoder 6.2 ms, prefill 10.2 ms, decode
+62.4 ms, total 84.8 ms. Decode is at parity, preprocessing and encoder are
+faster, and prefill pays 3.6 ms for copying the KV cache into the per-layer
+buffers one head at a time. 1.7B: prefill 21.5 ms, decode 158.3 ms.
+
+A micro-benchmark of one decode step (`QASR_BENCH=300`) puts the whole step at
+3.16 ms and the three kernels this runtime adds on top of the Python set at
+47 us: argmax 22 us, rotary row gather 17 us, token commit 8 us.
 
 Mel cost alone, end to end:
 
@@ -85,7 +91,19 @@ native\build\qwen3-asr-native.exe `
 
 `--mel-device cpu` selects the pocketfft front end, `--max-new-tokens` and
 `--max-cache` mirror the Python flags. `QASR_TIMING=1` prints per-stage
-milliseconds per file.
+milliseconds per file, `QASR_BENCH=N` times the decode pieces.
+
+Serve the same endpoint the Python runtime exposes:
+
+```powershell
+qwen3-asr-native.exe --model ... --encoder ... --decoder ... --serve --port 8000
+curl.exe -X POST "http://127.0.0.1:8000/v1/transcribe?language=English" `
+  -H "Content-Type: audio/flac" --data-binary "@audio.flac"
+```
+
+Audio is decoded from the request body through libsndfile's virtual IO, so no
+temporary files are written; bodies are capped at 128 MB and inference is
+serialised, matching the Python server.
 
 ## Not done yet
 
