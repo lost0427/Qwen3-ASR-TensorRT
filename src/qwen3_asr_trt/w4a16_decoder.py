@@ -250,7 +250,7 @@ class W4A16ASRDecoder:
         max_cache: int = 512,
         group: int = 32,
         keep_fp16: frozenset[str] = frozenset(),
-        growth_stride: int = 256,
+        growth_stride: int = 512,
     ):
         from transformers import AutoConfig, AutoModelForMultimodalLM
 
@@ -355,7 +355,8 @@ class W4A16ASRDecoder:
         self._logits = torch.empty((1, self.vocab), dtype=torch.float16, device=cuda)
         self._attn_out = torch.empty((1, self.heads * self.head_dim), dtype=torch.float16, device=cuda)
         self._captured: torch.cuda.CUDAGraph | None = None
-        self._allocate(min(self.growth_stride, max_cache))
+        # Same starting capacity as the native runtime (512 slots, 56 MB).
+        self._allocate(max(512, max_cache))
         # Packing the projections allocates large FP32 temporaries; return them to
         # the driver so the TensorRT prefill engine has room for its buffers.
         torch.cuda.empty_cache()

@@ -104,9 +104,8 @@ native\build\qwen3-asr-native.exe `
 milliseconds per file, `QASR_BENCH=N` times the decode pieces.
 
 `--max-cache` is the starting size in both runtimes, and both grow past it
-automatically. This runtime starts at 512 slots (58 MB) and grows in 512-slot
-steps; the Python one starts at 256 slots (28 MB) and grows in 256-slot steps.
-Sizing happens at prefill, from `prompt + max_new_tokens`, so a longer utterance
+automatically: 512 slots (56 MB) in 512-slot steps. Sizing happens at prefill,
+from `prompt + max_new_tokens`, so a longer utterance
 reallocates once, prints `[cache] growing KV cache ...`, and re-captures the
 decode graph. Only the new rotary rows are computed on a grow, so a single step
 costs a few milliseconds and a 512 -> 2560 jump measured about 10 ms with the

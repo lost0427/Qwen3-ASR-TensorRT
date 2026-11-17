@@ -156,7 +156,7 @@ Runtime flags, shared by `transcribe`, `benchmark` and `serve`:
 
 | Flag | Backend | Default | Effect |
 | --- | --- | ---: | --- |
-| `--max-cache` | `tensorrt-w4a16` | 4096 | Ceiling on the KV cache, not a reservation. The decoder allocates what each request needs — prompt plus `--max-new-tokens`, rounded up to 256 slots — and grows in place when a longer request arrives, so a 30 s file uses 768 slots (84 MB) and a 145 s file grows to 2560 (280 MB). Both sizes spend 112 KB per slot (28 layers × 8 KV heads × 128 × 2 values × FP16), so 4096 slots is 448 MB and about 5.2 minutes of audio. |
+| `--max-cache` | `tensorrt-w4a16` | 512 | Starting KV cache size, not a cap. The decoder starts at 512 slots and sizes each request as prompt plus `--max-new-tokens`, rounded up to 512 slots, growing in place when a longer request arrives: a 30 s file uses 1024 slots (112 MB) and a 145 s file grows to 2560 (280 MB). A slot costs 112 KB (28 layers × 8 KV heads × 128 × 2 values × FP16). |
 | `--group` | `tensorrt-w4a16` | 32 | Packing granularity of the INT4 kernels: one FP16 scale per 32 or per 64 weights. The FP16 checkpoint is packed at load time, so `64` also runs, but it is coarser — on 0.6B it measured 0.16 points worse WER than 32. A packed checkpoint fixes the value in `packed_config.json`. |
 | `--decoder-engine` | `tensorrt-w4a16` | `artifacts/<model>/decoder-prefill/asr-prefill.fp16.engine` | Prefill engine. Engines that emit `logits` and engines that emit the normed `hidden` both load. |
 | `--max-context-tokens` | `tensorrt-exllama` | 8192 | KV budget of the EXL3 path. |
@@ -203,17 +203,17 @@ All three are memory, not compute. A 145 s file needs 14,500 mel frames and a 1,
 
 The decoder side costs next to nothing in engine size — 512, 1024 and 2048 all produce a 2693.9 MB 1.7B engine — but TensorRT allocates activation buffers at the maximum profile shape, so a larger profile holds more memory at load time: the 2048 profile costs 238 MB more than the 512 one. Prefill measured 22.7, 24.8 and 24.3 ms on the same 100 utterances at 512, 1024 and 2048, with identical transcripts.
 
-The KV cache starts at `--max-cache` slots and grows past it when a request needs more, so the flag is a starting size, not a cap: `prompt + max_new_tokens` rounded up to the next 256 slots (the native runtime starts at 512 slots and rounds to 512). Growth prints one line, keeps the written prefix and re-captures the CUDA graph once for the new size.
+The KV cache starts at `--max-cache` slots and grows past it when a request needs more, so the flag is a starting size, not a cap: both runtimes start at 512 slots and round `prompt + max_new_tokens` up to the next 512. Growth prints one line, keeps the written prefix and re-captures the CUDA graph once for the new size.
 
 | Slots allocated | Memory | Audio |
 | --- | ---: | ---: |
-| 768 | 84 MB | 59 s |
-| 2048 | 224 MB | 157 s |
-| 2560 | 280 MB | 197 s |
-| 4096 | 448 MB | 5.2 min |
-| 8192 | 896 MB | 10.5 min |
+| 512 | 56 MB | 18 s |
+| 1024 | 112 MB | 58 s |
+| 1536 | 168 MB | 97 s |
+| 2048 | 224 MB | 137 s |
+| 2560 | 280 MB | 176 s |
 
-A 30 s file asks for `prompt + 256` slots, which rounds to 768; a 145 s file grows the buffer to 2560 in place, copying the written prefix and re-capturing the CUDA graph once for the new size. Nothing is released after a long request, so a session settles at the largest capacity it needed.
+A 30 s file asks for `prompt + 256` slots, which rounds to 1024; a 145 s file grows the buffer to 2560 in place, copying the written prefix and re-capturing the CUDA graph once for the new size. Nothing is released after a long request, so a session settles at the largest capacity it needed.
 
 What remains is the prefill profile. **Chunked prefill** would remove it: the prefill graph currently takes no cache input, which is what fixes `--max-seq`. Giving it `cache_k`/`cache_v`/`cache_len` the way the decode graph already has them — with a mask that keeps the prefix visible and the chunk causal — lets the prompt arrive in blocks of the profile size while the cache accumulates. The arithmetic is the same as one-shot prefill, so any WER change would come from fp16 reduction order and the tactics TensorRT picks per sequence length, not from the model. It also caps the quadratic attention cost of a long prompt at the block size.
 
