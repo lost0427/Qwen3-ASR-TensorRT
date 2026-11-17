@@ -167,7 +167,7 @@ Aligner::Aligner(const std::string& assets, const std::string& encoder_engine,
     : mel_device_(mel_device) {
   mel_assets_ = load_mel_assets(assets + "/mel.bin");
   tokenizer_ = load_aligner_tokenizer(assets + "/aligner_tokenizer.bin");
-  if (mel_device_ == "cuda") {
+  if (mel_device_ != "cpu") {
     tables_ = upload_mel_tables(mel_assets_);
     tables_ready_ = true;
   }
@@ -531,7 +531,8 @@ std::vector<AlignerItem> Aligner::align(const std::vector<float>& pcm, const std
   ensure(sequence, timestamps, frames, padded.size());
 
   const auto mel_started = std::chrono::steady_clock::now();
-  if (tables_ready_) {
+  const bool gpu_mel = mel_device_ == "cuda" || (mel_device_ == "auto" && frames >= 200);
+  if (gpu_mel) {
     cuda_check(cudaMemcpy(pcm_device_, padded.data(), padded.size() * 4, cudaMemcpyHostToDevice), "copy pcm");
     mel_forward_gpu(static_cast<const float*>(pcm_device_), tables_, mel_assets_,
                     static_cast<float*>(features_), valid_frames, frames);

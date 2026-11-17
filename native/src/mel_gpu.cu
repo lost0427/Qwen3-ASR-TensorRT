@@ -15,6 +15,11 @@ __device__ float atomic_max_float(float* address, float value) {
   return __uint_as_float(atomicMin(reinterpret_cast<unsigned int*>(address), __float_as_uint(value)));
 }
 
+// Four frames per block: the twiddle table and the mel filters are read once and
+// reused across the frames, which removes most of the global traffic on long
+// inputs.
+constexpr int kFramesPerBlock = 4;
+
 __global__ void mel_frames_kernel(const float* __restrict__ padded,
                                   const float2* __restrict__ twiddle,
                                   const float* __restrict__ window,
@@ -22,51 +27,76 @@ __global__ void mel_frames_kernel(const float* __restrict__ padded,
                                   int hop, int valid_frames, int frames, float* __restrict__ out,
                                   float* __restrict__ max_log) {
   extern __shared__ float shared[];
-  float* frame = shared;              // n_fft
-  float* power = frame + n_fft;       // n_freq
-  float* bins = power + n_freq;       // n_mel
+  float* frame = shared;                                  // kFramesPerBlock * n_fft
+  float* power = frame + kFramesPerBlock * n_fft;         // kFramesPerBlock * n_freq
 
-  const int index = blockIdx.x;
+  const int base = blockIdx.x * kFramesPerBlock;
   const int tid = threadIdx.x;
 
-  // Frames past the signal are zero padding on the mel axis.
-  if (index >= valid_frames) {
-    for (int m = tid; m < n_mel; m += blockDim.x) out[static_cast<long long>(m) * frames + index] = 0.0f;
+  int count = 0;
+  for (int d = 0; d < kFramesPerBlock; ++d) {
+    if (base + d < valid_frames) ++count;
+  }
+  if (count == 0) {
+    // Frames past the signal are zero padding on the mel axis.
+    for (int d = 0; d < kFramesPerBlock; ++d) {
+      const int index = base + d;
+      if (index >= frames) break;
+      for (int m = tid; m < n_mel; m += blockDim.x) {
+        out[static_cast<long long>(m) * frames + index] = 0.0f;
+      }
+    }
     return;
   }
 
-  const int start = index * hop;
-  for (int n = tid; n < n_fft; n += blockDim.x) {
-    frame[n] = padded[start + n] * window[n];
+  for (int d = 0; d < kFramesPerBlock; ++d) {
+    const int index = base + d;
+    if (index >= frames) break;
+    float* target = frame + d * n_fft;
+    if (index < valid_frames) {
+      const int start = index * hop;
+      for (int n = tid; n < n_fft; n += blockDim.x) target[n] = padded[start + n] * window[n];
+    } else {
+      for (int n = tid; n < n_fft; n += blockDim.x) target[n] = 0.0f;
+    }
   }
   __syncthreads();
 
   for (int k = tid; k < n_freq; k += blockDim.x) {
     const float2* row = twiddle + static_cast<long long>(k) * n_fft;
-    float re = 0.0f;
-    float im = 0.0f;
+    float re[kFramesPerBlock] = {0.0f, 0.0f, 0.0f, 0.0f};
+    float im[kFramesPerBlock] = {0.0f, 0.0f, 0.0f, 0.0f};
     for (int n = 0; n < n_fft; ++n) {
-      const float value = frame[n];
       const float2 factor = row[n];
-      re += value * factor.x;
-      im -= value * factor.y;
+      for (int d = 0; d < kFramesPerBlock; ++d) {
+        const float value = frame[d * n_fft + n];
+        re[d] += value * factor.x;
+        im[d] -= value * factor.y;
+      }
     }
-    power[k] = re * re + im * im;
+    for (int d = 0; d < kFramesPerBlock; ++d) power[d * n_freq + k] = re[d] * re[d] + im[d] * im[d];
   }
   __syncthreads();
 
   float local_max = -INFINITY;
   for (int m = tid; m < n_mel; m += blockDim.x) {
     const float* filter = filters + static_cast<long long>(m) * n_freq;
-    float sum = 0.0f;
-    for (int k = 0; k < n_freq; ++k) sum += filter[k] * power[k];
-    if (sum < 1e-10f) sum = 1e-10f;
-    const float value = log10f(sum);
-    bins[m] = value;
-    out[static_cast<long long>(m) * frames + index] = value;
-    local_max = fmaxf(local_max, value);
+    float sums[kFramesPerBlock] = {0.0f, 0.0f, 0.0f, 0.0f};
+    for (int k = 0; k < n_freq; ++k) {
+      const float weight = filter[k];
+      for (int d = 0; d < kFramesPerBlock; ++d) sums[d] += weight * power[d * n_freq + k];
+    }
+    for (int d = 0; d < kFramesPerBlock; ++d) {
+      const int index = base + d;
+      if (index >= frames) break;
+      float sum = sums[d];
+      if (sum < 1e-10f) sum = 1e-10f;
+      const float value = log10f(sum);
+      out[static_cast<long long>(m) * frames + index] = value;
+      local_max = fmaxf(local_max, value);
+    }
   }
-  // One atomic per frame instead of one per (frame, mel bin).
+  // One atomic per block instead of one per (frame, mel bin).
   for (int offset = 16; offset > 0; offset >>= 1) {
     local_max = fmaxf(local_max, __shfl_down_sync(0xffffffff, local_max, offset));
   }
@@ -97,8 +127,10 @@ void mel_forward_launch(const void* padded, const void* twiddle, const void* win
                         int n_mel, int n_freq, int n_fft, int hop, int valid_frames, int frames, void* out,
                         void* max_log, cudaStream_t stream) {
   fill_initial_max<<<1, 1, 0, stream>>>(static_cast<float*>(max_log));
-  const size_t shared_bytes = static_cast<size_t>(n_fft + n_freq + n_mel) * sizeof(float);
-  mel_frames_kernel<<<frames, 128, shared_bytes, stream>>>(
+  const size_t shared_bytes =
+      static_cast<size_t>(kFramesPerBlock) * (n_fft + n_freq) * sizeof(float);
+  const int blocks = (frames + kFramesPerBlock - 1) / kFramesPerBlock;
+  mel_frames_kernel<<<blocks, 128, shared_bytes, stream>>>(
       static_cast<const float*>(padded), static_cast<const float2*>(twiddle),
       static_cast<const float*>(window), static_cast<const float*>(filters), n_mel, n_freq, n_fft, hop,
       valid_frames, frames, static_cast<float*>(out), static_cast<float*>(max_log));

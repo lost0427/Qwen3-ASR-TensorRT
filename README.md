@@ -274,7 +274,11 @@ with. The long set costs about 1.9 GB more VRAM at load because TensorRT sizes
 activations for the maximum profile, even when the input is short.
 
 The native runtime exposes the same thing as `qwen3-asr-native.exe --align`;
-see [native/README.md](native/README.md#forced-alignment).
+see [native/README.md](native/README.md#forced-alignment). Both servers can also
+serve it: `POST /v1/align?language=English&text=<urlencoded>` with the audio as
+the body returns `{"items": [{"text", "start_time", "end_time"}], "timings": {...}}`.
+Enable it with `--aligner-model`/`--aligner-engine` on `serve` in Python, or
+`--align-encoder`/`--align-decoder` in the native runtime.
 
 
 

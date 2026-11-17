@@ -124,6 +124,11 @@ def main() -> None:
     api.add_argument("--engine", type=Path)
     api.add_argument("--max-cache", type=int, default=512, help=MAX_CACHE_HELP)
     api.add_argument("--max-context-tokens", type=int, default=8192)
+    api.add_argument("--aligner-model", default=None, help="also serve POST /v1/align with this aligner")
+    api.add_argument("--aligner-preset", choices=("window", "long"), default="window")
+    api.add_argument("--aligner-precision", choices=("bf16", "fp16"), default="bf16")
+    api.add_argument("--aligner-engine", type=Path)
+    api.add_argument("--aligner-decoder-engine", type=Path)
     api.add_argument("--group", type=int, choices=(32, 64), default=32)
 
     build_decoder = commands.add_parser("build-decoder-prefill")
@@ -536,4 +541,19 @@ def main() -> None:
             parser.error(f"audio file not found: {args.audio}")
         print(json.dumps({"text": transcriber.transcribe(args.audio, args.language)}, ensure_ascii=False))
     else:
-        serve(transcriber, args.host, args.port)
+        aligner = None
+        if args.aligner_model or args.aligner_engine or args.aligner_decoder_engine:
+            from .aligner import TensorRTAligner
+
+            model = args.aligner_model or "Qwen/Qwen3-ForcedAligner-0.6B"
+            directory = _artifact_dir(model)
+            encoder = args.aligner_engine or (
+                directory / f"aligner-encoder-{args.aligner_preset}.{args.aligner_precision}.engine"
+            )
+            if not Path(encoder).is_file():
+                encoder = directory / f"aligner-encoder-{args.aligner_preset}.bf16.engine"
+            decoder = args.aligner_decoder_engine or (
+                directory / f"aligner-decoder-{args.aligner_preset}.{args.aligner_precision}.engine"
+            )
+            aligner = TensorRTAligner(str(model), Path(encoder), Path(decoder), args.aligner_precision)
+        serve(transcriber, args.host, args.port, aligner)

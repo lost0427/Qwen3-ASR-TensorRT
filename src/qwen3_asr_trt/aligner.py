@@ -586,14 +586,16 @@ def build_aligner_decoder_engine(
     seq_range: tuple[int, int, int] = (8, 256, 1024),
     ts_range: tuple[int, int, int] = (2, 64, 256),
     tf32: bool = True,
+    strongly_typed: bool = True,
 ) -> None:
     import tensorrt as trt
 
     logger = trt.Logger(trt.Logger.WARNING)
     builder = trt.Builder(logger)
-    network = builder.create_network(
-        1 << int(trt.NetworkDefinitionCreationFlag.STRONGLY_TYPED)
-    )
+    flags = 0
+    if strongly_typed:
+        flags |= 1 << int(trt.NetworkDefinitionCreationFlag.STRONGLY_TYPED)
+    network = builder.create_network(flags)
     parser = trt.OnnxParser(network, logger)
     if not parser.parse_from_file(str(onnx_path)):
         errors = "\n".join(str(parser.get_error(i)) for i in range(parser.num_errors))

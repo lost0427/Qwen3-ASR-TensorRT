@@ -6,6 +6,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <memory>
 #include <mutex>
 #include <string>
 #include <vector>
@@ -31,11 +32,13 @@ struct Options {
   std::string decoder;
   std::string assets = "assets";
   std::string language = "English";
-  std::string mel_device = "cuda";
+  std::string mel_device = "auto";
   int max_new_tokens = 256;
   int max_cache = 512;
   bool serve = false;
   bool align = false;
+  std::string align_encoder;
+  std::string align_decoder;
   std::string text;
   std::string text_file;
   std::string host = "127.0.0.1";
@@ -72,7 +75,7 @@ class Transcriber {
   explicit Transcriber(const Options& options) : options_(options) {
     mel_assets_ = qasr::load_mel_assets(options.assets + "/mel.bin");
     tokenizer_ = qasr::load_tokenizer_assets(options.assets + "/tokenizer.bin");
-    if (options.mel_device == "cuda") {
+    if (options.mel_device != "cpu") {
       tables_ = qasr::upload_mel_tables(mel_assets_);
       tables_ready_ = true;
     }
@@ -150,7 +153,10 @@ std::string Transcriber::process(const std::vector<float>& input, const char* la
   Timer mel_timer;
   const auto padded = qasr::reflect_pad(pcm, mel_assets_.n_fft / 2);
   ensure(mel_bytes, static_cast<size_t>(frames) * 4, padded.size() * 4, 0);
-  if (options_.mel_device == "cuda") {
+  // pocketfft wins below ~200 frames (the GPU kernel is launch bound there).
+  const bool gpu_mel =
+      options_.mel_device == "cuda" || (options_.mel_device == "auto" && frames >= 200);
+  if (gpu_mel) {
     cuda_check(cudaMemcpy(pcm_device_, padded.data(), padded.size() * 4, cudaMemcpyHostToDevice), "copy pcm");
     qasr::mel_forward_gpu(static_cast<const float*>(pcm_device_), tables_, mel_assets_,
                           static_cast<float*>(features_), valid_frames, frames);
@@ -264,6 +270,10 @@ int run(const std::vector<std::string>& args) {
       options.serve = true;
     } else if (arg == "--align") {
       options.align = true;
+    } else if (arg == "--align-encoder") {
+      options.align_encoder = next();
+    } else if (arg == "--align-decoder") {
+      options.align_decoder = next();
     } else if (arg == "--text") {
       options.text = next();
     } else if (arg == "--text-file") {
@@ -348,6 +358,45 @@ int run(const std::vector<std::string>& args) {
       httplib::Server server;
       server.set_payload_max_length(128ull * 1024 * 1024);
       std::mutex lock;
+      std::unique_ptr<qasr::Aligner> aligner;
+      if (!options.align_encoder.empty() && !options.align_decoder.empty()) {
+        aligner.reset(new qasr::Aligner(options.assets, options.align_encoder, options.align_decoder,
+                                        options.mel_device));
+      }
+      auto escape_json = [](const std::vector<qasr::AlignerItem>& items) {
+        std::string json = "[";
+        for (size_t i = 0; i < items.size(); ++i) {
+          char buffer[512];
+          std::snprintf(buffer, sizeof(buffer),
+                        "%s{\"text\": \"%s\", \"start_time\": %.3f, \"end_time\": %.3f}",
+                        i ? ", " : "", escape(items[i].text).c_str(), items[i].start, items[i].end);
+          json += buffer;
+        }
+        return json + "]";
+      };
+      if (aligner) {
+        server.Post("/v1/align", [&](const httplib::Request& request, httplib::Response& response) {
+          std::string language = options.language;
+          if (request.has_param("language")) language = request.get_param_value("language");
+          const std::string text = request.has_param("text") ? request.get_param_value("text") : "";
+          if (text.empty()) {
+            response.status = 400;
+            response.set_content("{\"error\": \"the text query parameter is required\"}", "application/json");
+            return;
+          }
+          try {
+            std::lock_guard<std::mutex> guard(lock);
+            int sample_rate = 0;
+            const auto pcm = qasr::load_audio_memory(request.body.data(), request.body.size(), sample_rate);
+            if (sample_rate != 16000) throw std::runtime_error("only 16 kHz audio is supported");
+            const auto items = aligner->align(pcm, text, language);
+            response.set_content("{\"items\": " + escape_json(items) + "}", "application/json");
+          } catch (const std::exception& error) {
+            response.status = 400;
+            response.set_content("{\"error\": \"" + escape(error.what()) + "\"}", "application/json");
+          }
+        });
+      }
       server.Post("/v1/transcribe", [&](const httplib::Request& request, httplib::Response& response) {
         std::string language = options.language;
         if (request.has_param("language")) language = request.get_param_value("language");

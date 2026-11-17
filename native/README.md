@@ -57,15 +57,16 @@ Mel cost alone, end to end:
 
 | Frames | GPU | CPU (`pocketfft`) |
 | --- | ---: | ---: |
-| 400 (3.3 s audio) | 1.0 ms | 0.8 ms |
-| 14,500 (145 s audio) | 24.4 ms | 35.9 ms |
+| 400 (3.3 s audio) | 0.8 ms | 1.0 ms |
+| 14,500 (145 s audio) | 12.2 ms | 45.3 ms |
 
-`--mel-device cuda` (default) runs the whole front end on the GPU: one block per
-frame, interleaved twiddle table, one block-level max reduction, and mel
-accumulation and log in the same kernel. The CPU path builds frames
-contiguously, transposes them to `[n_mel][frames]` in cache-sized blocks, and
-uses the triangular support of the mel filters instead of the full 80 x 201
-product.
+`--mel-device auto` (the default) uses `pocketfft` below ~600 frames, where the
+GPU kernel is launch bound, and the GPU kernel above. `--mel-device cuda` runs
+the whole front end on the GPU with four frames per block, so the twiddle table
+and the mel filters are read once and reused across the four frames. The CPU
+path builds frames contiguously, transposes them to `[n_mel][frames]` in
+cache-sized blocks, and uses the triangular support of the mel filters instead of
+the full 80 x 201 product.
 
 ## Build
 
@@ -156,6 +157,17 @@ Audio is decoded from the request body through libsndfile's virtual IO, so no
 temporary files are written; bodies are capped at 128 MB and inference is
 serialised, matching the Python server.
 
+Adding `--align-encoder` / `--align-decoder` also registers `POST /v1/align`,
+which takes the transcript as a query parameter and returns the word timings:
+
+```powershell
+qwen3-asr-native.exe --model ... --serve --port 8000 `
+  --align-encoder artifacts\qwen3-forcedaligner-0.6b\aligner-encoder-window.fp16.engine `
+  --align-decoder artifacts\qwen3-forcedaligner-0.6b\aligner-decoder-window.fp16.engine
+curl.exe -X POST "http://127.0.0.1:8000/v1/align?language=English&text=hello%20world" `
+  -H "Content-Type: audio/flac" --data-binary "@audio.flac"
+```
+
 ## Forced alignment
 
 `--align` runs the same pipeline as `qwen3-asr align`: the prompt is
@@ -195,11 +207,13 @@ Memory, measured on the same 8 GB card (process baseline 1.08 GB):
 TensorRT allocates activations at the maximum profile shape, so the long set
 costs its 1.9 GB of extra activations up front regardless of input length.
 
-Verified against the Python aligner: 54 words on three test-clean files differ in
-one 80 ms boundary, and 168 words on a 70 s clip differ in four. Per call on a
-3 s file the pipeline takes 12 ms (mel 0.8, encoder 1.5, decoder 9); Python takes
-17 ms steady state and 266 ms for a cold CLI run. A 70 s clip takes 140 ms here
-against 405 ms in Python.
+Verified against the Python aligner: 54 words on three test-clean files match
+exactly, and 168 words on a 70 s clip differ in four 80 ms boundaries. Per call
+on a 3 s file the pipeline takes 11 ms (mel 0.3, encoder 2, decoder 8); Python
+takes 17 ms steady state and 266 ms for a cold CLI run. A 70 s clip takes 94 ms
+here against 281 ms in Python. Four frames per mel block cut the front end from
+12 ms to 6 ms there; decoder build knobs (4 GiB workspace, opt 1024, dropping
+strong typing) changed nothing measurable, so the decoder runs at its limit.
 
 ## Not done yet
 
