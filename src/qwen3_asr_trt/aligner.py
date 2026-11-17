@@ -8,6 +8,14 @@ import numpy as np
 
 from .audio import load_audio
 
+# (encoder frames, decoder tokens, timestamp slots). `long` is the 5-minute
+# envelope the model card advertises; windows are 10 ms of audio each and every
+# word costs two timestamp slots.
+ALIGNER_PRESETS = {
+    "window": (3600, 1024, 256),
+    "long": (30000, 8192, 2048),
+}
+
 
 def _is_kept_char(ch: str) -> bool:
     if ch == "'":
@@ -311,6 +319,20 @@ class TensorRTAligner:
 
         decoder_started = time.perf_counter()
         token_ids = input_ids.to("cuda")
+        sequence_length = int(token_ids.shape[1])
+        timestamp_count = int((token_ids[0] == self.timestamp_token_id).sum())
+        if self.decoder.max_seq and sequence_length > self.decoder.max_seq:
+            raise ValueError(
+                f"aligner prompt of {sequence_length} tokens exceeds this decoder's "
+                f"{self.decoder.max_seq}-token profile; rebuild it with "
+                f"`qwen3-asr build-aligner --preset long`"
+            )
+        if self.decoder.max_timestamps and timestamp_count > self.decoder.max_timestamps:
+            raise ValueError(
+                f"{timestamp_count} timestamp slots (two per word) exceed this decoder's "
+                f"{self.decoder.max_timestamps}-slot profile; rebuild it with "
+                f"`qwen3-asr build-aligner --preset long`"
+            )
         hidden = self.token_embedding(token_ids)
         audio_mask = (token_ids == self.audio_pad_id).unsqueeze(-1)
         hidden = hidden.masked_scatter(
@@ -336,17 +358,88 @@ class TensorRTAligner:
 
 
 def _load_aligner(model_id: str, dtype):
+    """Loads the aligner weights, falling back to transformers when qwen-asr is
+    missing or incompatible with the installed transformers version."""
     try:
         from qwen_asr import Qwen3ForcedAligner
-    except ImportError as exc:
+    except ImportError:
+        return _load_aligner_transformers(model_id, dtype)
+    try:
+        return Qwen3ForcedAligner.from_pretrained(str(model_id), device_map="cpu", dtype=dtype)
+    except (TypeError, AttributeError):
+        return _load_aligner_transformers(model_id, dtype)
+
+
+def _load_aligner_transformers(model_id: str, dtype):
+    import json
+    from types import SimpleNamespace
+
+    import torch
+    from safetensors.torch import load_file
+    from transformers import AutoModel, AutoProcessor, Qwen3ASRConfig
+
+    path = Path(str(model_id))
+    raw = json.loads((path / "config.json").read_text(encoding="utf-8"))["thinker_config"]
+    audio_config = dict(raw["audio_config"])
+    # The aligner checkpoint names the audio tower class differently from the
+    # version this transformers build ships.
+    audio_config["model_type"] = "qwen3_asr_encoder"
+    config = Qwen3ASRConfig(text_config=dict(raw["text_config"]), audio_config=audio_config)
+    base = AutoModel.from_config(config)
+
+    state = load_file(str(path / "model.safetensors"))
+    remap = {
+        "thinker.audio_tower.proj1.": "multi_modal_projector.linear_1.",
+        "thinker.audio_tower.proj2.": "multi_modal_projector.linear_2.",
+        "thinker.audio_tower.": "audio_tower.",
+        "thinker.model.": "language_model.",
+        "thinker.multi_modal_projector.": "multi_modal_projector.",
+    }
+    converted = {}
+    head = None
+    for key, value in state.items():
+        if key == "thinker.lm_head.weight":
+            head = value
+            continue
+        for prefix, target in remap.items():
+            if key.startswith(prefix):
+                converted[target + key[len(prefix):]] = value
+                break
+    missing, unexpected = base.load_state_dict(converted, strict=False)
+    if missing or unexpected:
         raise RuntimeError(
-            "build-aligner requires the `qwen-asr` package; install it in a "
-            "separate build environment so it does not replace the project's transformers version"
-        ) from exc
-    return Qwen3ForcedAligner.from_pretrained(str(model_id), device_map="cpu", dtype=dtype)
+            f"aligner weights did not map cleanly: missing {missing[:4]}, unexpected {unexpected[:4]}"
+        )
+    del state, converted
+
+    lm_head = torch.nn.Linear(head.shape[1], head.shape[0], bias=False)
+    lm_head.weight.data = head
+
+    class Thinker(torch.nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.audio_tower = base.audio_tower
+            self.model = base.language_model
+            self.multi_modal_projector = base.multi_modal_projector
+            self.lm_head = lm_head
+            self.config = config
+
+    thinker = Thinker().eval().to(dtype)
+
+    class Model(torch.nn.Module):
+        """Mirrors qwen-asr's ``aligner.model``: exposes the thinker and ``.to``."""
+
+        def __init__(self) -> None:
+            super().__init__()
+            self.thinker = thinker
+
+    processor = AutoProcessor.from_pretrained(str(model_id), local_files_only=path.is_dir())
+    return SimpleNamespace(model=Model(), processor=processor)
 
 
-def export_aligner_encoder(model_id: str, output_path: Path, precision: str = "bf16") -> None:
+def export_aligner_encoder(
+    model_id: str, output_path: Path, precision: str = "bf16", max_frames: int = 3600
+) -> None:
     import torch
 
     from .tensorrt_encoder import DynamicAudioWindow
@@ -359,7 +452,9 @@ def export_aligner_encoder(model_id: str, output_path: Path, precision: str = "b
     wrapper = DynamicAudioWindow(
         thinker.audio_tower,
         getattr(thinker, "multi_modal_projector", None),
-        apply_output_projection=True,
+        # The qwen-asr tower keeps the output projection inside the tower; the
+        # transformers tower exposes it as multi_modal_projector.
+        apply_output_projection=hasattr(thinker.audio_tower, "proj1"),
     ).eval().to("cuda:0")
     frames = wrapper.frames_per_chunk * 8
     features = torch.zeros((1, 128, frames), dtype=torch.float32, device="cuda")
@@ -374,8 +469,8 @@ def export_aligner_encoder(model_id: str, output_path: Path, precision: str = "b
         opset_version=20,
         dynamo=True,
         dynamic_shapes={
-            "input_features": {2: torch.export.Dim("frames", min=100, max=3600)},
-            "input_features_mask": {1: torch.export.Dim("masked", min=100, max=3600)},
+            "input_features": {2: torch.export.Dim("frames", min=100, max=max_frames)},
+            "input_features_mask": {1: torch.export.Dim("masked", min=100, max=max_frames)},
         },
     )
 
@@ -443,7 +538,11 @@ class _AlignerDecoderForExport:
 
 
 def export_aligner_decoder_tensorrt(
-    model_id: str, output_path: Path, precision: str = "bf16"
+    model_id: str,
+    output_path: Path,
+    precision: str = "bf16",
+    max_seq: int = 1024,
+    max_timestamps: int = 256,
 ) -> None:
     """Export the aligner text decoder as a single-pass ONNX graph.
 
@@ -474,8 +573,8 @@ def export_aligner_decoder_tensorrt(
         opset_version=20,
         dynamo=True,
         dynamic_shapes={
-            "inputs_embeds": {1: torch.export.Dim("seq", min=8, max=1024)},
-            "ts_positions": {1: torch.export.Dim("nts", min=2, max=256)},
+            "inputs_embeds": {1: torch.export.Dim("seq", min=8, max=max_seq)},
+            "ts_positions": {1: torch.export.Dim("nts", min=2, max=max_timestamps)},
         },
     )
 
@@ -542,6 +641,8 @@ class TensorRTAlignDecoder:
         self.stream = torch.cuda.Stream()
         self.buffers: dict[tuple, "torch.Tensor"] = {}
         self.dtype = torch.float16
+        self.max_seq = int(self.engine.get_tensor_profile_shape("inputs_embeds", 0)[2][1])
+        self.max_timestamps = int(self.engine.get_tensor_profile_shape("ts_positions", 0)[2][1])
         for index in range(self.engine.num_io_tensors):
             name = self.engine.get_tensor_name(index)
             if name == "inputs_embeds":

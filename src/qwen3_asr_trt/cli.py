@@ -93,6 +93,12 @@ def main() -> None:
     align.add_argument("--encoder-precision", choices=("bf16", "fp16"), default=None)
     align.add_argument("--decoder-engine", type=Path)
     align.add_argument("--engine", type=Path)
+    align.add_argument(
+        "--aligner-preset",
+        choices=("window", "long"),
+        default="window",
+        help="which built aligner engines to use when the paths are not given",
+    )
     align.add_argument("--format", choices=("json", "srt", "txt"), default="json")
     align.add_argument("--output", type=Path)
 
@@ -153,6 +159,19 @@ def main() -> None:
     build_aligner.add_argument("--output-dir", type=Path)
     build_aligner.add_argument("--workspace-gib", type=int, default=2)
     build_aligner.add_argument("--decoder-precision", choices=("bf16", "fp16", "both"), default="both")
+    build_aligner.add_argument(
+        "--preset",
+        choices=("window", "long"),
+        default="window",
+        help="window: 36 s / 1024 tokens / 128 words; long: 5 min / 8192 tokens / 1024 words",
+    )
+    build_aligner.add_argument(
+        "--max-frames", type=int, default=None, help="override the preset's encoder ceiling, in 10 ms frames"
+    )
+    build_aligner.add_argument("--max-seq", type=int, default=None, help="override the preset's decoder token ceiling")
+    build_aligner.add_argument(
+        "--max-timestamps", type=int, default=None, help="override the preset's timestamp slot ceiling (2 per word)"
+    )
 
     quantize = commands.add_parser("quantize")
     quantize.add_argument("--input-dir", type=Path)
@@ -197,14 +216,18 @@ def main() -> None:
     elif args.command == "align":
         aligner_dir = _artifact_dir(args.aligner_model)
         args.decoder_dir = args.decoder_dir or aligner_dir / "decoder-exl3-4bpw"
-        args.encoder_precision = args.encoder_precision or args.decoder_precision
+        if args.encoder_precision is None:
+            preferred = aligner_dir / f"aligner-encoder-{args.aligner_preset}.{args.decoder_precision}.engine"
+            args.encoder_precision = args.decoder_precision if preferred.is_file() else "bf16"
         args.engine = (
             args.engine
-            or aligner_dir / f"aligner-encoder-window.{args.encoder_precision}.engine"
+            or aligner_dir
+            / f"aligner-encoder-{args.aligner_preset}.{args.encoder_precision}.engine"
         )
         args.decoder_engine = (
             args.decoder_engine
-            or aligner_dir / f"aligner-decoder-window.{args.decoder_precision}.engine"
+            or aligner_dir
+            / f"aligner-decoder-{args.aligner_preset}.{args.decoder_precision}.engine"
         )
     else:
         args.decoder_dir = args.decoder_dir or artifact_dir / "decoder"
@@ -242,6 +265,7 @@ def main() -> None:
 
     if args.command == "build-aligner":
         from .aligner import (
+            ALIGNER_PRESETS,
             build_aligner_decoder_engine,
             export_aligner_decoder,
             export_aligner_decoder_tensorrt,
@@ -249,22 +273,40 @@ def main() -> None:
         )
         from .tensorrt_encoder import build_engine
 
-        onnx_path = args.output_dir / "aligner-encoder-window.bf16.onnx"
-        engine_path = args.output_dir / "aligner-encoder-window.bf16.engine"
+        frames, seq, timestamps = ALIGNER_PRESETS[args.preset]
+        frames = args.max_frames or frames
+        seq = args.max_seq or seq
+        timestamps = args.max_timestamps or timestamps
+        overridden = (args.max_frames, args.max_seq, args.max_timestamps) != (None, None, None)
+        tag = f"{frames}-{seq}-{timestamps}" if overridden else args.preset
+
+        onnx_path = args.output_dir / f"aligner-encoder-{tag}.bf16.onnx"
+        engine_path = args.output_dir / f"aligner-encoder-{tag}.bf16.engine"
         if not engine_path.is_file():
-            export_aligner_encoder(args.aligner_model, onnx_path)
-            build_engine(onnx_path, engine_path, args.workspace_gib)
+            export_aligner_encoder(args.aligner_model, onnx_path, max_frames=frames)
+            build_engine(
+                onnx_path,
+                engine_path,
+                args.workspace_gib,
+                frames_range=(100, min(1000, frames), frames),
+            )
         export_aligner_decoder(args.aligner_model, args.output_dir / "decoder")
 
         precisions = (
             ["bf16", "fp16"] if args.decoder_precision == "both" else [args.decoder_precision]
         )
         for precision in precisions:
-            decoder_onnx = args.output_dir / f"aligner-decoder-window.{precision}.onnx"
-            decoder_engine = args.output_dir / f"aligner-decoder-window.{precision}.engine"
-            export_aligner_decoder_tensorrt(args.aligner_model, decoder_onnx, precision)
+            decoder_onnx = args.output_dir / f"aligner-decoder-{tag}.{precision}.onnx"
+            decoder_engine = args.output_dir / f"aligner-decoder-{tag}.{precision}.engine"
+            export_aligner_decoder_tensorrt(
+                args.aligner_model, decoder_onnx, precision, max_seq=seq, max_timestamps=timestamps
+            )
             build_aligner_decoder_engine(
-                decoder_onnx, decoder_engine, args.workspace_gib
+                decoder_onnx,
+                decoder_engine,
+                args.workspace_gib,
+                seq_range=(8, min(512, seq), seq),
+                ts_range=(2, min(64, timestamps), timestamps),
             )
             decoder_onnx.unlink(missing_ok=True)
             data_file = decoder_onnx.with_suffix(decoder_onnx.suffix + ".data")

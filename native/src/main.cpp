@@ -2,6 +2,7 @@
 // as the Python runtime.
 
 #include <chrono>
+#include <cctype>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -10,7 +11,12 @@
 #include <vector>
 
 #include <cuda_runtime.h>
+#ifdef _WIN32
+#define WIN32_LEAN_AND_MEAN
+#include <windows.h>
+#endif
 
+#include "aligner.h"
 #include "decoder.h"
 #include "httplib.h"
 #include "qasr.h"
@@ -29,6 +35,9 @@ struct Options {
   int max_new_tokens = 256;
   int max_cache = 512;
   bool serve = false;
+  bool align = false;
+  std::string text;
+  std::string text_file;
   std::string host = "127.0.0.1";
   int port = 8000;
   std::vector<std::string> audio;
@@ -156,6 +165,8 @@ std::string Transcriber::process(const std::vector<float>& input, const char* la
   Timer encoder_timer;
   encoder_->set_shape("input_features", nvinfer1::Dims{3, {1, mel_assets_.n_mel, frames}});
   encoder_->set_shape("input_features_mask", nvinfer1::Dims{2, {1, frames}});
+  // The reference runtime feeds the encoder an all-ones mask, so padding frames
+  // stay visible; keep that behaviour to stay transcript-identical.
   std::vector<int32_t> mask_host(frames, 1);
   cuda_check(cudaMemcpy(mask_, mask_host.data(), static_cast<size_t>(frames) * 4, cudaMemcpyHostToDevice),
              "copy mask");
@@ -212,13 +223,26 @@ std::string Transcriber::process(const std::vector<float>& input, const char* la
 
 }  // namespace
 
-int main(int argc, char** argv) {
+namespace {
+
+std::string to_utf8(const wchar_t* text) {
+  if (!text) return {};
+  const int bytes = WideCharToMultiByte(CP_UTF8, 0, text, -1, nullptr, 0, nullptr, nullptr);
+  if (bytes <= 1) return {};
+  std::string out(static_cast<size_t>(bytes - 1), '\0');
+  WideCharToMultiByte(CP_UTF8, 0, text, -1, out.data(), bytes, nullptr, nullptr);
+  return out;
+}
+
+}  // namespace
+
+int run(const std::vector<std::string>& args) {
   Options options;
-  for (int i = 1; i < argc; ++i) {
-    const std::string arg = argv[i];
+  for (size_t i = 1; i < args.size(); ++i) {
+    const std::string arg = args[i];
     auto next = [&]() -> std::string {
-      if (i + 1 >= argc) throw std::runtime_error("missing value for " + arg);
-      return argv[++i];
+      if (i + 1 >= args.size()) throw std::runtime_error("missing value for " + arg);
+      return args[++i];
     };
     if (arg == "--model") {
       options.model = next();
@@ -238,6 +262,12 @@ int main(int argc, char** argv) {
       options.max_cache = std::atoi(next().c_str());
     } else if (arg == "--serve") {
       options.serve = true;
+    } else if (arg == "--align") {
+      options.align = true;
+    } else if (arg == "--text") {
+      options.text = next();
+    } else if (arg == "--text-file") {
+      options.text_file = next();
     } else if (arg == "--host") {
       options.host = next();
     } else if (arg == "--port") {
@@ -249,11 +279,13 @@ int main(int argc, char** argv) {
       return 2;
     }
   }
-  if (options.model.empty() || options.encoder.empty() || options.decoder.empty()) {
+  if ((!options.align && options.model.empty()) || options.encoder.empty() || options.decoder.empty()) {
     std::fprintf(stderr,
                  "usage: qwen3-asr-native --model DIR --encoder ENGINE --decoder ENGINE "
                  "(AUDIO... | --serve [--host H] [--port P]) [--assets DIR] [--language NAME] "
-                 "[--mel-device cuda|cpu] [--max-cache N]\n");
+                 "[--mel-device cuda|cpu] [--max-cache N]\n"
+                 "       qwen3-asr-native --align --encoder ALIGNER_ENCODER --decoder ALIGNER_DECODER "
+                 "(--text TEXT | --text-file FILE) AUDIO [--assets DIR] [--language NAME]\n");
     return 2;
   }
   if (!options.serve && options.audio.empty()) {
@@ -262,6 +294,55 @@ int main(int argc, char** argv) {
   }
 
   try {
+    if (options.align) {
+      if (options.text.empty() && options.text_file.empty()) {
+        std::fprintf(stderr, "error: --align requires --text or --text-file\n");
+        return 2;
+      }
+      std::string text = options.text;
+      if (text.empty()) {
+        const std::vector<char> blob = qasr::read_file(options.text_file);
+        text.assign(blob.begin(), blob.end());
+      }
+      while (!text.empty() && std::isspace(static_cast<unsigned char>(text.back()))) text.pop_back();
+      size_t first = 0;
+      while (first < text.size() && std::isspace(static_cast<unsigned char>(text[first]))) ++first;
+      text.erase(0, first);
+
+      qasr::Aligner aligner(options.assets, options.encoder, options.decoder, options.mel_device);
+      for (const auto& path : options.audio) {
+        int sample_rate = 0;
+        const auto pcm = qasr::load_audio(path, sample_rate);
+        if (sample_rate != 16000) throw std::runtime_error("only 16 kHz audio is supported");
+        qasr::AlignerTimings timings;
+        const auto items = aligner.align(pcm, text, options.language, &timings);
+
+        std::string json = "{\"items\": [";
+        for (size_t i = 0; i < items.size(); ++i) {
+          char buffer[512];
+          std::snprintf(buffer, sizeof(buffer),
+                        "%s{\"text\": \"%s\", \"start_time\": %.3f, \"end_time\": %.3f}",
+                        i ? ", " : "", escape(items[i].text).c_str(), items[i].start, items[i].end);
+          json += buffer;
+        }
+        char tail[512];
+        std::snprintf(tail, sizeof(tail),
+                      "], \"timings\": {\"melMs\": %.2f, \"encoderMs\": %.2f, \"decoderMs\": %.2f, "
+                      "\"totalMs\": %.2f, \"frames\": %d, \"tokens\": %d, \"words\": %d}}",
+                      timings.mel_ms, timings.encoder_ms, timings.decoder_ms, timings.total_ms,
+                      timings.frames, timings.tokens, timings.words);
+        json += tail;
+        std::printf("%s\n", json.c_str());
+        std::fflush(stdout);
+        if (timing_enabled()) {
+          std::fprintf(stderr, "[time] %s mel %.2f encoder %.2f decoder %.2f total %.1f | frames %d tokens %d words %d\n",
+                       path.c_str(), timings.mel_ms, timings.encoder_ms, timings.decoder_ms,
+                       timings.total_ms, timings.frames, timings.tokens, timings.words);
+        }
+      }
+      return 0;
+    }
+
     Transcriber transcriber(options);
     if (options.serve) {
       httplib::Server server;
@@ -305,3 +386,17 @@ int main(int argc, char** argv) {
     return 1;
   }
 }
+
+#ifdef _WIN32
+int wmain(int argc, wchar_t** wide) {
+  std::vector<std::string> args;
+  args.reserve(static_cast<size_t>(argc));
+  for (int i = 0; i < argc; ++i) args.push_back(to_utf8(wide[i]));
+  return run(args);
+}
+#else
+int main(int argc, char** argv) {
+  std::vector<std::string> args(argv, argv + argc);
+  return run(args);
+}
+#endif

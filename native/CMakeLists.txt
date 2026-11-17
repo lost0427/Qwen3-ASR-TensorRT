@@ -17,6 +17,7 @@ add_executable(qwen3-asr-native
   src/assets.cpp
   src/audio.cpp
   src/decoder.cpp
+  src/aligner.cpp
   src/ops.cu
   src/mel_cpu.cpp
   src/mel_device.cpp

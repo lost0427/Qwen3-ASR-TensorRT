@@ -55,6 +55,46 @@ __global__ void scatter_audio_kernel(__half* __restrict__ out, const __nv_bfloat
   for (int i = threadIdx.x; i < hidden; i += blockDim.x) dst[i] = __float2half(__bfloat162float(row[i]));
 }
 
+// Replaces the placeholder positions with encoder embeddings (fp16 -> fp16).
+__global__ void scatter_audio_half_kernel(__half* __restrict__ out, const __half* __restrict__ audio,
+                                          int first, int audio_count, int hidden) {
+  const int index = blockIdx.x;
+  if (index >= audio_count) return;
+  const __half* row = audio + static_cast<long long>(index) * hidden;
+  __half* dst = out + static_cast<long long>(first + index) * hidden;
+  for (int i = threadIdx.x; i < hidden; i += blockDim.x) dst[i] = row[i];
+}
+
+// One argmax per row: the aligner decoder emits (1, slots, 5000) in one pass.
+__global__ void argmax_rows_kernel(const __half* __restrict__ logits, int rows, int columns,
+                                   int* __restrict__ out) {
+  __shared__ float values[1024];
+  __shared__ int indices[1024];
+  const int row = blockIdx.x;
+  if (row >= rows) return;
+  const __half* base = logits + static_cast<long long>(row) * columns;
+  float best = -1e30f;
+  int best_index = 0;
+  for (int i = threadIdx.x; i < columns; i += blockDim.x) {
+    const float value = __half2float(base[i]);
+    if (value > best) {
+      best = value;
+      best_index = i;
+    }
+  }
+  values[threadIdx.x] = best;
+  indices[threadIdx.x] = best_index;
+  __syncthreads();
+  for (int stride = blockDim.x / 2; stride > 0; stride >>= 1) {
+    if (threadIdx.x < stride && values[threadIdx.x + stride] > values[threadIdx.x]) {
+      values[threadIdx.x] = values[threadIdx.x + stride];
+      indices[threadIdx.x] = indices[threadIdx.x + stride];
+    }
+    __syncthreads();
+  }
+  if (threadIdx.x == 0) out[row] = indices[0];
+}
+
 __global__ void argmax_kernel(const __half* __restrict__ logits, int n, int* __restrict__ out) {
   __shared__ float values[1024];
   __shared__ int indices[1024];
@@ -133,4 +173,15 @@ void commit_token_launch(const void* token, void* produced, void* generated, voi
 
 void argmax_launch(const void* logits, int n, void* out, cudaStream_t stream) {
   argmax_kernel<<<1, 1024, 0, stream>>>(static_cast<const __half*>(logits), n, static_cast<int*>(out));
+}
+
+void scatter_audio_half_launch(void* out, const void* audio, int first, int audio_count, int hidden,
+                               cudaStream_t stream) {
+  scatter_audio_half_kernel<<<audio_count, 256, 0, stream>>>(
+      static_cast<__half*>(out), static_cast<const __half*>(audio), first, audio_count, hidden);
+}
+
+void argmax_rows_launch(const void* logits, int rows, int columns, void* out, cudaStream_t stream) {
+  argmax_rows_kernel<<<rows, 1024, 0, stream>>>(static_cast<const __half*>(logits), rows, columns,
+                                                static_cast<int*>(out));
 }

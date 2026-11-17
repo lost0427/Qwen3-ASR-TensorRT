@@ -227,12 +227,18 @@ TensorRT engines are generated locally for the target GPU and TensorRT environme
 Build the forced aligner encoder and export both decoder variants:
 
 ```powershell
-# TensorRT encoder + TensorRT bf16/fp16 decoders
+# 36 s / 1024-token / 128-word engines (default)
 uv run qwen3-asr build-aligner
+
+# 5 min / 8192-token / 1024-word engines
+uv run qwen3-asr build-aligner --preset long
 
 # optional EXL3 4 bpw decoder
 uv run qwen3-asr --model Qwen/Qwen3-ForcedAligner-0.6B quantize --bits 4 --head-bits 16
 ```
+
+`--max-frames`, `--max-seq` and `--max-timestamps` override the preset values;
+the engine file names carry the preset (`aligner-encoder-long.fp16.engine`).
 
 ## Transcribe audio
 
@@ -259,6 +265,16 @@ It supports `--format json`, `--format srt`, and `--format txt`; `--text` can be
 used instead of `--text-file`. `--decoder-precision fp16` selects the fp16 engine, which is about 8% faster,
 `--backend tensorrt-exllama` selects the EXL3 decoder, and `--engine` /
 `--decoder-engine` point at specific builds.
+
+`--aligner-preset long` switches to the 5-minute engines. The limits are the
+engine profiles: the default `window` set takes 36 s of audio and 128 words
+(2 timestamp slots per word), the `long` set 300 s and 1024 words. Over-long
+input is rejected before any buffer is touched, naming the preset to rebuild
+with. The long set costs about 1.9 GB more VRAM at load because TensorRT sizes
+activations for the maximum profile, even when the input is short.
+
+The native runtime exposes the same thing as `qwen3-asr-native.exe --align`;
+see [native/README.md](native/README.md#forced-alignment).
 
 
 

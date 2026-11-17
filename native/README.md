@@ -13,6 +13,7 @@ the packed INT4 decoder and tokenizer assets, and transcribes without PyTorch.
 | prompt assembly | prefix + audio placeholders + language suffix, from `tokenizer.bin` |
 | encoder + prefill | the published TensorRT engines |
 | decode | hand-written INT4 kernels, captured into a CUDA graph |
+| forced alignment | TensorRT audio encoder + a single-pass TensorRT decoder, own BPE tokenizer |
 | CLI | batch: one process, many files, engines loaded once |
 | HTTP API | `POST /v1/transcribe?language=...`, same protocol as the Python server |
 
@@ -87,7 +88,15 @@ uv run python native/tools/gen_assets.py --model models\Qwen3-ASR-0.6B-hf-awq32-
 
 `mel.bin` holds the mel filter bank and the Hann window from the Python feature
 extractor; `tokenizer.bin` holds the byte-level vocabulary, special token ids,
-the prompt prefix and the per-language suffix.
+the prompt prefix and the per-language suffix. The aligner adds
+`aligner_tokenizer.bin` (151,643-entry BPE vocabulary, 151,387 merges, special
+ids and the Unicode class table, 3.6 MB) and `aligner_embed.bin` (the FP16
+152,064 x 1024 token embedding table, 297 MB):
+
+```powershell
+uv run python native\tools\gen_aligner_assets.py --model models\Qwen3-ForcedAligner-0.6B `
+  --tokenizer artifacts\qwen3-forcedaligner-0.6b\decoder\tokenizer.json --out native\assets
+```
 
 ## Run
 
@@ -147,7 +156,54 @@ Audio is decoded from the request body through libsndfile's virtual IO, so no
 temporary files are written; bodies are capped at 128 MB and inference is
 serialised, matching the Python server.
 
+## Forced alignment
+
+`--align` runs the same pipeline as `qwen3-asr align`: the prompt is
+`<|audio_start|>` + one `<|audio_pad|>` per encoder token + `<|audio_end|>` +
+words joined by `<timestamp><timestamp>`; one encoder pass and one decoder pass
+emit the timestamp bins, and the monotonic repair is the reference algorithm.
+
+```powershell
+qwen3-asr-native.exe --align `
+  --encoder artifacts\qwen3-forcedaligner-0.6b\aligner-encoder-window.fp16.engine `
+  --decoder artifacts\qwen3-forcedaligner-0.6b\aligner-decoder-window.fp16.engine `
+  --assets native\assets --language English `
+  --text "Stuff it into you his belly counseled him" audio.flac
+```
+
+The output is `{"items": [{"text", "start_time", "end_time"}], "timings": {...}}`,
+free of PyTorch.
+
+Engine profiles are built with `qwen3-asr build-aligner --preset window|long`:
+
+| Preset | Encoder | Decoder tokens | Timestamp slots | Audio | Words |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| `window` | 3600 frames | 1024 | 256 | 36 s | 128 |
+| `long` | 30000 frames | 8192 | 2048 | 300 s | 1024 |
+
+The two timestamp slots per word are what bind first on both presets. Both
+limits are checked before any buffer is touched, so an over-long request names
+the preset to rebuild with.
+
+Memory, measured on the same 8 GB card (process baseline 1.08 GB):
+
+| Set | Engine files | Load delta | Peak |
+| --- | ---: | ---: | ---: |
+| `window` | 1534 MB | +1748 MB | 2.85 GB |
+| `long` | 1463 MB | +3622 MB | 4.84 GB (300 s input) |
+
+TensorRT allocates activations at the maximum profile shape, so the long set
+costs its 1.9 GB of extra activations up front regardless of input length.
+
+Verified against the Python aligner: 54 words on three test-clean files differ in
+one 80 ms boundary, and 168 words on a 70 s clip differ in four. Per call on a
+3 s file the pipeline takes 12 ms (mel 0.8, encoder 1.5, decoder 9); Python takes
+17 ms steady state and 266 ms for a cold CLI run. A 70 s clip takes 140 ms here
+against 405 ms in Python.
+
 ## Not done yet
 
 - Audio must be 16 kHz; the Python path resamples with soxr.
 - `benchmark` and the HTTP server are Python-only.
+- `--align` is CLI-only, and Japanese/Korean text falls back to per-character
+  splitting (the Python path uses nagisa/soynlp when they are installed).
