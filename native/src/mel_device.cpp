@@ -8,9 +8,9 @@
 
 #include "qasr.h"
 
-void mel_forward_launch(const void* pcm, int length, const void* twiddle, const void* window,
-                        const void* filters, int n_mel, int n_freq, int n_fft, int hop, int frames,
-                        void* out, void* max_log, cudaStream_t stream);
+void mel_forward_launch(const void* padded, const void* twiddle, const void* window, const void* filters,
+                        int n_mel, int n_freq, int n_fft, int hop, int valid_frames, int frames, void* out,
+                        void* max_log, cudaStream_t stream);
 
 namespace qasr {
 
@@ -79,14 +79,14 @@ MelDeviceTables upload_mel_tables(const MelAssets& assets) {
   return tables;
 }
 
-void mel_forward_gpu(const float* pcm, int length, const MelDeviceTables& tables, const MelAssets& assets,
-                     float* out, int frames) {
+void mel_forward_gpu(const float* padded, const MelDeviceTables& tables, const MelAssets& assets,
+                     float* out, int valid_frames, int frames) {
   static float* max_log = nullptr;
   if (max_log == nullptr) {
     cuda_check(cudaMalloc(&max_log, sizeof(float)), "cudaMalloc mel max");
   }
-  mel_forward_launch(pcm, length, tables.cos, tables.window, tables.filters, assets.n_mel, assets.n_freq,
-                     assets.n_fft, assets.hop, frames, out, max_log, nullptr);
+  mel_forward_launch(padded, tables.cos, tables.window, tables.filters, assets.n_mel, assets.n_freq,
+                     assets.n_fft, assets.hop, valid_frames, frames, out, max_log, nullptr);
 }
 
 }  // namespace qasr

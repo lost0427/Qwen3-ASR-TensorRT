@@ -86,6 +86,7 @@ class Decoder {
   void* graph_ = nullptr;
   void* graph_exec_ = nullptr;
   void* ids_dev_ = nullptr;
+  void* positions_dev_ = nullptr;
   void* prompt_dev_ = nullptr;
   void* prefill_head_ = nullptr;
   void* prefill_k_ = nullptr;

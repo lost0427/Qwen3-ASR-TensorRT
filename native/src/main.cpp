@@ -128,18 +128,18 @@ std::string Transcriber::process(const std::vector<float>& input, const char* la
   int valid_frames = 0;
   const int frames = qasr::mel_frame_count(static_cast<int>(pcm.size()), mel_assets_.hop, 100, valid_frames);
   const size_t mel_bytes = static_cast<size_t>(frames) * mel_assets_.n_mel * 4;
-  ensure(mel_bytes, static_cast<size_t>(frames) * 4, pcm.size() * 4, 0);
 
   Timer mel_timer;
-  cuda_check(cudaMemset(features_, 0, mel_bytes), "zero features");
+  const auto padded = qasr::reflect_pad(pcm, mel_assets_.n_fft / 2);
+  ensure(mel_bytes, static_cast<size_t>(frames) * 4, padded.size() * 4, 0);
   if (options_.mel_device == "cuda") {
-    cuda_check(cudaMemcpy(pcm_device_, pcm.data(), pcm.size() * 4, cudaMemcpyHostToDevice), "copy pcm");
-    qasr::mel_forward_gpu(static_cast<const float*>(pcm_device_), static_cast<int>(pcm.size()), tables_,
-                          mel_assets_, static_cast<float*>(features_), frames);
+    cuda_check(cudaMemcpy(pcm_device_, padded.data(), padded.size() * 4, cudaMemcpyHostToDevice), "copy pcm");
+    qasr::mel_forward_gpu(static_cast<const float*>(pcm_device_), tables_, mel_assets_,
+                          static_cast<float*>(features_), valid_frames, frames);
     cuda_check(cudaDeviceSynchronize(), "mel sync");
   } else {
     std::vector<float> host(static_cast<size_t>(frames) * mel_assets_.n_mel, 0.0f);
-    qasr::mel_forward_cpu(pcm.data(), static_cast<int>(pcm.size()), mel_assets_, host.data(), frames);
+    qasr::mel_forward_cpu(padded.data(), valid_frames, frames, mel_assets_, host.data());
     cuda_check(cudaMemcpy(features_, host.data(), mel_bytes, cudaMemcpyHostToDevice), "copy mel");
   }
   const double mel_ms = mel_timer.ms();

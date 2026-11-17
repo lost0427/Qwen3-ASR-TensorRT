@@ -16,9 +16,7 @@ void cuda_check(int code, const char* what) {
 }
 
 Engine::Engine(const std::string& path) {
-  std::ifstream stream(path, std::ios::binary);
-  if (!stream) throw std::runtime_error("cannot open engine: " + path);
-  std::vector<char> blob((std::istreambuf_iterator<char>(stream)), std::istreambuf_iterator<char>());
+  std::vector<char> blob = read_file(path);
   runtime_ = nvinfer1::createInferRuntime(logger_);
   if (!runtime_) throw std::runtime_error("createInferRuntime failed");
   engine_ = runtime_->deserializeCudaEngine(blob.data(), blob.size());

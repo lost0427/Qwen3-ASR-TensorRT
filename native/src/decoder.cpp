@@ -75,9 +75,8 @@ struct TensorView {
 };
 
 std::map<std::string, TensorView> load_safetensors(const std::string& path, std::vector<uint8_t>& blob) {
-  std::ifstream stream(path, std::ios::binary);
-  if (!stream) throw std::runtime_error("cannot open " + path);
-  blob.assign(std::istreambuf_iterator<char>(stream), std::istreambuf_iterator<char>());
+  const std::vector<char> raw = read_file(path);
+  blob.assign(raw.begin(), raw.end());
   if (blob.size() < 8) throw std::runtime_error("bad safetensors file");
   uint64_t header_size = 0;
   std::memcpy(&header_size, blob.data(), 8);
@@ -155,9 +154,8 @@ void debug_dump(const char* label, const void* device, int count) {
 }  // namespace
 
 ModelConfig read_model_config(const std::string& directory) {
-  std::ifstream stream(directory + "/config.json");
-  if (!stream) throw std::runtime_error("cannot open config.json in " + directory);
-  std::string text((std::istreambuf_iterator<char>(stream)), std::istreambuf_iterator<char>());
+  const std::vector<char> raw = read_file(directory + "/config.json");
+  std::string text(raw.begin(), raw.end());
   // The audio tower repeats several of these keys, so read the text section only.
   const size_t text_config = text.find("\"text_config\"");
   if (text_config != std::string::npos) text = text.substr(text_config);
@@ -267,8 +265,6 @@ void Decoder::allocate_cache(int capacity) {
     void* v = nullptr;
     cuda_check(cudaMalloc(&k, static_cast<size_t>(capacity) * kv_dim * 2), "cudaMalloc kv");
     cuda_check(cudaMalloc(&v, static_cast<size_t>(capacity) * kv_dim * 2), "cudaMalloc kv");
-    cuda_check(cudaMemset(k, 0, static_cast<size_t>(capacity) * kv_dim * 2), "cudaMemset kv");
-    cuda_check(cudaMemset(v, 0, static_cast<size_t>(capacity) * kv_dim * 2), "cudaMemset kv");
     cache_k_.push_back(k);
     cache_v_.push_back(v);
   }
@@ -323,8 +319,12 @@ int Decoder::prefill(Engine& engine, const std::vector<int32_t>& ids, const void
     ids_dev_ = nullptr;
     prefill_k_ = nullptr;
     prefill_v_ = nullptr;
+    if (positions_dev_) cudaFree(positions_dev_);
+    positions_dev_ = nullptr;
     cuda_check(cudaMalloc(&prompt_dev_, static_cast<size_t>(seq) * hidden * 2), "cudaMalloc prompt");
     cuda_check(cudaMalloc(&ids_dev_, static_cast<size_t>(seq) * sizeof(int)), "cudaMalloc ids");
+    cuda_check(cudaMalloc(&positions_dev_, static_cast<size_t>(seq) * sizeof(int64_t)),
+               "cudaMalloc positions");
     const size_t cache_bytes = static_cast<size_t>(seq) * config_.layers * kv_dim * 2;
     cuda_check(cudaMalloc(&prefill_k_, cache_bytes), "cudaMalloc prefill cache");
     cuda_check(cudaMalloc(&prefill_v_, cache_bytes), "cudaMalloc prefill cache");
@@ -349,15 +349,13 @@ int Decoder::prefill(Engine& engine, const std::vector<int32_t>& ids, const void
   engine.set_shape("inputs_embeds", nvinfer1::Dims{3, {1, seq, hidden}});
   engine.set_shape("position_ids", nvinfer1::Dims{2, {1, seq}});
   // The prefill graph takes int64 position ids, like torch.arange.
-  void* positions = nullptr;
   std::vector<int64_t> position_ids(seq);
   for (int i = 0; i < seq; ++i) position_ids[i] = i;
-  cuda_check(cudaMalloc(&positions, seq * sizeof(int64_t)), "cudaMalloc positions");
-  cuda_check(cudaMemcpy(positions, position_ids.data(), seq * sizeof(int64_t), cudaMemcpyHostToDevice),
-             "copy positions");
+  cuda_check(cudaMemcpy(positions_dev_, position_ids.data(), seq * sizeof(int64_t),
+                        cudaMemcpyHostToDevice), "copy positions");
 
   engine.bind("inputs_embeds", prompt_dev_);
-  engine.bind("position_ids", positions);
+  engine.bind("position_ids", positions_dev_);
   engine.bind(emits_logits ? "logits" : "hidden", prefill_head_);
   engine.bind("cache_k", prefill_k_);
   engine.bind("cache_v", prefill_v_);

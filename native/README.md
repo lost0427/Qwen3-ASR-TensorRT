@@ -18,20 +18,20 @@ the packed INT4 decoder and tokenizer assets, and transcribes without PyTorch.
 
 ## Verification
 
-Corpus WER matches the Python run exactly, and most transcripts are identical
-character for character:
+Corpus WER matches the Python run on the same 100 utterance sample, and most
+transcripts are identical character for character:
 
 | Model | 100 test-clean utterances | Identical transcripts | Median per utterance |
 | --- | --- | --- | --- |
-| 0.6B | WER 1.6624% (same as Python) | 85 / 100 | 84 ms |
-| 1.7B | WER 1.1083% (same as Python) | 93 / 100 | 189 ms |
+| 0.6B | WER 1.5345% (1.6624% with CPU mel, same as Python) | 92 / 100 | 84 ms |
+| 1.7B | WER 1.1083% (same as Python) | 97 / 100 | 189 ms |
 
-The CPU and GPU mel paths give identical transcripts to each other (100/100 on the same set).
-The remaining differences against Python are punctuation and borderline words: the GPU mel
-kernel differs from `WhisperFeatureExtractor` by about 1e-5 because it
-accumulates the DFT in a different order, and a handful of positions are that
-close. Every stage up to the decode loop reproduces Python bit for bit when fed
-the same mel.
+The CPU and GPU mel paths agree on 94/100 transcripts for 0.6B and 98/100 for
+1.7B. The remaining differences against Python are punctuation and borderline
+words: the GPU mel kernel differs from `WhisperFeatureExtractor` by about 1e-5
+because it accumulates the DFT in a different order, and a handful of positions
+are that close. Every stage up to the decode loop reproduces Python bit for bit
+when fed the same mel.
 
 ## Speed
 
@@ -46,15 +46,23 @@ A micro-benchmark of one decode step (`QASR_BENCH=300`) puts the whole step at
 3.16 ms and the three kernels this runtime adds on top of the Python set at
 47 us: argmax 22 us, rotary row gather 17 us, token commit 8 us.
 
+Cold start to first transcript, including reading the packed INT4 weights and
+deserialising the engines: 2.3 s for 0.6B (0.6 GB of weights) and 5.7 s for
+1.7B (1.5 GB).
+
 Mel cost alone, end to end:
 
 | Frames | GPU | CPU (`pocketfft`) |
 | --- | ---: | ---: |
-| 400 (3.3 s audio) | 2.0 ms | 3.0 ms |
-| 14,500 (145 s audio) | 31.6 ms | 107.6 ms |
+| 400 (3.3 s audio) | 1.0 ms | 0.8 ms |
+| 14,500 (145 s audio) | 24.4 ms | 35.9 ms |
 
 `--mel-device cuda` (default) runs the whole front end on the GPU: one block per
-frame, interleaved twiddle table, mel accumulation and log in the same kernel.
+frame, interleaved twiddle table, one block-level max reduction, and mel
+accumulation and log in the same kernel. The CPU path builds frames
+contiguously, transposes them to `[n_mel][frames]` in cache-sized blocks, and
+uses the triangular support of the mel filters instead of the full 80 x 201
+product.
 
 ## Build
 

@@ -15,19 +15,11 @@ __device__ float atomic_max_float(float* address, float value) {
   return __uint_as_float(atomicMin(reinterpret_cast<unsigned int*>(address), __float_as_uint(value)));
 }
 
-__device__ float reflect_sample(const float* pcm, int length, int index) {
-  if (index < 0) index = -index;
-  if (index >= length) index = 2 * (length - 1) - index;
-  if (index < 0) index = 0;
-  if (index >= length) index = length - 1;
-  return pcm[index];
-}
-
-__global__ void mel_frames_kernel(const float* __restrict__ pcm, int length,
+__global__ void mel_frames_kernel(const float* __restrict__ padded,
                                   const float2* __restrict__ twiddle,
                                   const float* __restrict__ window,
                                   const float* __restrict__ filters, int n_mel, int n_freq, int n_fft,
-                                  int hop, int pad, int frames, float* __restrict__ out,
+                                  int hop, int valid_frames, int frames, float* __restrict__ out,
                                   float* __restrict__ max_log) {
   extern __shared__ float shared[];
   float* frame = shared;              // n_fft
@@ -37,9 +29,15 @@ __global__ void mel_frames_kernel(const float* __restrict__ pcm, int length,
   const int index = blockIdx.x;
   const int tid = threadIdx.x;
 
+  // Frames past the signal are zero padding on the mel axis.
+  if (index >= valid_frames) {
+    for (int m = tid; m < n_mel; m += blockDim.x) out[static_cast<long long>(m) * frames + index] = 0.0f;
+    return;
+  }
+
   const int start = index * hop;
   for (int n = tid; n < n_fft; n += blockDim.x) {
-    frame[n] = reflect_sample(pcm, length, start - pad + n) * window[n];
+    frame[n] = padded[start + n] * window[n];
   }
   __syncthreads();
 
@@ -57,6 +55,7 @@ __global__ void mel_frames_kernel(const float* __restrict__ pcm, int length,
   }
   __syncthreads();
 
+  float local_max = -INFINITY;
   for (int m = tid; m < n_mel; m += blockDim.x) {
     const float* filter = filters + static_cast<long long>(m) * n_freq;
     float sum = 0.0f;
@@ -65,7 +64,19 @@ __global__ void mel_frames_kernel(const float* __restrict__ pcm, int length,
     const float value = log10f(sum);
     bins[m] = value;
     out[static_cast<long long>(m) * frames + index] = value;
-    atomic_max_float(max_log, value);
+    local_max = fmaxf(local_max, value);
+  }
+  // One atomic per frame instead of one per (frame, mel bin).
+  for (int offset = 16; offset > 0; offset >>= 1) {
+    local_max = fmaxf(local_max, __shfl_down_sync(0xffffffff, local_max, offset));
+  }
+  __shared__ float warp_max[8];
+  if ((tid & 31) == 0) warp_max[tid >> 5] = local_max;
+  __syncthreads();
+  if (tid == 0) {
+    float block_max = warp_max[0];
+    for (int i = 1; i < static_cast<int>(blockDim.x / 32); ++i) block_max = fmaxf(block_max, warp_max[i]);
+    atomic_max_float(max_log, block_max);
   }
 }
 
@@ -82,16 +93,15 @@ __global__ void fill_initial_max(float* value) { value[0] = -INFINITY; }
 
 }  // namespace
 
-void mel_forward_launch(const void* pcm, int length, const void* twiddle, const void* window,
-                        const void* filters, int n_mel, int n_freq, int n_fft, int hop, int frames,
-                        void* out, void* max_log, cudaStream_t stream) {
+void mel_forward_launch(const void* padded, const void* twiddle, const void* window, const void* filters,
+                        int n_mel, int n_freq, int n_fft, int hop, int valid_frames, int frames, void* out,
+                        void* max_log, cudaStream_t stream) {
   fill_initial_max<<<1, 1, 0, stream>>>(static_cast<float*>(max_log));
-  const int pad = n_fft / 2;
   const size_t shared_bytes = static_cast<size_t>(n_fft + n_freq + n_mel) * sizeof(float);
   mel_frames_kernel<<<frames, 128, shared_bytes, stream>>>(
-      static_cast<const float*>(pcm), length, static_cast<const float2*>(twiddle),
+      static_cast<const float*>(padded), static_cast<const float2*>(twiddle),
       static_cast<const float*>(window), static_cast<const float*>(filters), n_mel, n_freq, n_fft, hop,
-      pad, frames, static_cast<float*>(out), static_cast<float*>(max_log));
+      valid_frames, frames, static_cast<float*>(out), static_cast<float*>(max_log));
   const long long count = static_cast<long long>(n_mel) * frames;
   mel_finish_kernel<<<256, 256, 0, stream>>>(static_cast<float*>(out), count,
                                              static_cast<const float*>(max_log));

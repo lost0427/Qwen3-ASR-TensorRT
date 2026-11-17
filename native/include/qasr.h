@@ -61,9 +61,17 @@ std::string decode_tokens(const TokenizerAssets& assets, const std::vector<int32
 std::vector<float> load_audio(const std::string& path, int& sample_rate);
 std::vector<float> load_audio_memory(const void* data, size_t size, int& sample_rate);
 
+// Mirrors the signal by `pad` samples on both sides, like torch.stft's centre
+// padding, so the frames are contiguous reads.
+std::vector<float> reflect_pad(const std::vector<float>& pcm, int pad);
+
+// Reads a whole file in one go (the iterators are ~20x slower on large files).
+std::vector<char> read_file(const std::string& path);
+
 // Log-mel features as [n_mel][frames], frames padded to a multiple of `multiple`.
 // The CPU path uses pocketfft, the library torch's CPU STFT is built on.
-void mel_forward_cpu(const float* pcm, int length, const MelAssets& assets, float* out, int frames);
+void mel_forward_cpu(const float* padded, int valid_frames, int frames, const MelAssets& assets,
+                     float* out);
 
 // The same features on the GPU: windowed DFT, mel accumulation and log in two passes.
 struct MelDeviceTables {
@@ -80,8 +88,8 @@ struct MelDeviceTables {
 };
 
 MelDeviceTables upload_mel_tables(const MelAssets& assets);
-void mel_forward_gpu(const float* pcm, int length, const MelDeviceTables& tables, const MelAssets& assets,
-                     float* out, int frames);
+void mel_forward_gpu(const float* padded, const MelDeviceTables& tables, const MelAssets& assets,
+                     float* out, int valid_frames, int frames);
 
 int mel_frame_count(int length, int hop, int multiple, int& valid_frames);
 

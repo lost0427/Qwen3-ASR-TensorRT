@@ -109,6 +109,28 @@ std::vector<float> load_audio(const std::string& path, int& sample_rate) {
 #endif
 }
 
+std::vector<float> reflect_pad(const std::vector<float>& pcm, int pad) {
+  const int length = static_cast<int>(pcm.size());
+  std::vector<float> padded(static_cast<size_t>(length) + 2 * pad);
+  for (int i = 0; i < pad; ++i) padded[static_cast<size_t>(i)] = pcm[static_cast<size_t>(pad - i)];
+  std::memcpy(padded.data() + pad, pcm.data(), static_cast<size_t>(length) * sizeof(float));
+  for (int i = 0; i < pad; ++i) {
+    padded[static_cast<size_t>(pad + length + i)] = pcm[static_cast<size_t>(length - 2 - i)];
+  }
+  return padded;
+}
+
+std::vector<char> read_file(const std::string& path) {
+  std::ifstream stream(path, std::ios::binary | std::ios::ate);
+  if (!stream) throw std::runtime_error("cannot open " + path);
+  const std::streamsize size = stream.tellg();
+  if (size <= 0) throw std::runtime_error("empty file: " + path);
+  std::vector<char> blob(static_cast<size_t>(size));
+  stream.seekg(0, std::ios::beg);
+  if (!stream.read(blob.data(), size)) throw std::runtime_error("short read: " + path);
+  return blob;
+}
+
 std::vector<float> load_audio_memory(const void* data, size_t size, int& sample_rate) {
 #ifdef _WIN32
   void* handle = open_sndfile_library();
