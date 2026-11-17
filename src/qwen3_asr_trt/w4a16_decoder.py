@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import shutil
+import sys
 from pathlib import Path
 
 import torch
@@ -237,7 +238,7 @@ class _TRTPrefill:
 class W4A16ASRDecoder:
     """Greedy decoder: TensorRT prefill, packed-INT4 decode.
 
-    The KV cache is allocated per request: ``max_cache`` is a ceiling, the buffer
+    The KV cache is allocated per request: ``max_cache`` is a floor, the buffer
     grows in ``growth_stride`` steps to cover the actual prompt plus transcript,
     and the CUDA graph is re-captured once per size.
     """
@@ -388,16 +389,17 @@ class W4A16ASRDecoder:
         self._captured = None
 
     def ensure_capacity(self, tokens: int) -> None:
-        """Grow the cache to cover ``tokens`` slots, up to ``max_cache``."""
+        """Grow the cache to cover ``tokens`` slots; ``max_cache`` is a floor."""
         if tokens <= self.capacity:
             return
-        if tokens > self.max_cache:
-            raise ValueError(
-                f"this request needs {tokens} KV slots but the decoder is capped at "
-                f"{self.max_cache}; raise --max-cache to at least {tokens}"
-            )
         step = self.growth_stride
-        self._allocate(min(self.max_cache, ((tokens + step - 1) // step) * step))
+        target = ((tokens + step - 1) // step) * step
+        print(
+            f"[cache] growing KV cache {self.capacity} -> {target} slots for a {tokens}-token request",
+            file=sys.stderr,
+        )
+        self.max_cache = max(self.max_cache, target)
+        self._allocate(target)
 
     # ---------------------------------------------------------------- forward
 
@@ -492,7 +494,9 @@ class W4A16ASRDecoder:
         return logits, seq
 
     def generate(self, inputs_embeds: Tensor, max_new_tokens: int = 128, chunk: int = 8) -> list[int]:
-        _, _ = self.prefill_prompt(inputs_embeds)
+        # Reserve the whole transcript up front so any growth happens before the
+        # prefill writes the prompt into the cache.
+        _, _ = self.prefill_prompt(inputs_embeds, reserve=max_new_tokens)
         return self.decode_loop(max_new_tokens, chunk)
 
     def decode_loop(self, max_new_tokens: int = 128, chunk: int = 8) -> list[int]:
@@ -522,8 +526,7 @@ class W4A16ASRDecoder:
             if stop is not None:
                 return tokens[:stop]
         if produced < max_new_tokens:
-            raise ValueError(
-                f"transcript stopped at the {self.capacity}-token KV cache after {produced} tokens; "
-                f"raise --max-cache above {self.max_cache}"
+            raise RuntimeError(
+                f"transcript stopped at the {self.capacity}-token KV cache after {produced} tokens"
             )
         return self._produced[:produced].tolist()

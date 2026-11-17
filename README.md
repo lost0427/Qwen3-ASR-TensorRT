@@ -125,7 +125,7 @@ uv run qwen3-asr --model .\models\Qwen3-ASR-1.7B-hf-awq32 transcribe .\audio.wav
   --decoder-engine artifacts\qwen3-asr-1.7b\decoder-prefill\asr-prefill.fp16.engine
 ```
 
-`--max-seq` is the longest prompt the prefill engine accepts and it has to cover the whole utterance, because the audio tokens dominate the prompt at roughly 13 per second of audio; the default 512 covers about 39 seconds. The encoder engine has its own ceiling (`--max-frames`, 3600 frames), and both have to cover the audio before a long file transcodes in one pass. `--max-cache` is a KV ceiling rather than a reservation, so it needs no tuning per file; the next section covers both knobs. For reference, the Transformers checkpoint accepts 65,536 positions.
+`--max-seq` is the longest prompt the prefill engine accepts and it has to cover the whole utterance, because the audio tokens dominate the prompt at roughly 13 per second of audio; the default 512 covers about 39 seconds. The encoder engine has its own ceiling (`--max-frames`, 3600 frames), and both have to cover the audio before a long file transcodes in one pass. `--max-cache` is a starting KV size rather than a reservation: the decoder grows past it per request, so it needs no tuning per file; the next section covers both knobs. For reference, the Transformers checkpoint accepts 65,536 positions.
 
 A prompt longer than the profile raises an error naming the value to rebuild with instead of being truncated.
 
@@ -197,13 +197,13 @@ Three limits decide how much audio one call takes, and on the shipped engines th
 | --- | --- | ---: | ---: |
 | Encoder input | `qwen3-asr build --max-frames` | 3600 frames | 36 s |
 | Decoder prefill | `build-decoder-prefill --max-seq` | 512 tokens | 39 s |
-| KV cache | `transcribe --max-cache` | ceiling, 4096 | 5.2 min |
+| KV cache | `transcribe --max-cache` | starting size, 4096 | 5.2 min and beyond |
 
 All three are memory, not compute. A 145 s file needs 14,500 mel frames and a 1,903-token prompt, so it fails on the encoder before the decoder sees it; rebuilding the encoder with `--max-frames 16000` gives a 610 MB engine, the same size as the 36 s one, and the file then transcribes in one pass: 14.9 s in total — 1.0 s preprocessing, 0.17 s encoder, 8.0 s prefill and 5.6 s decoding 477 tokens. Prefill is 12% of that pipeline on short utterances and 54% here, because attention grows with the square of the prompt. Either overrun names the knob and the value to rebuild with.
 
 The decoder side costs next to nothing in engine size — 512, 1024 and 2048 all produce a 2693.9 MB 1.7B engine — but TensorRT allocates activation buffers at the maximum profile shape, so a larger profile holds more memory at load time: the 2048 profile costs 238 MB more than the 512 one. Prefill measured 22.7, 24.8 and 24.3 ms on the same 100 utterances at 512, 1024 and 2048, with identical transcripts.
 
-The KV cache is sized per request, so the ceiling is not what the process holds:
+The KV cache starts at `--max-cache` slots and grows past it when a request needs more, so the flag is a starting size, not a cap: `prompt + max_new_tokens` rounded up to the next 256 slots. Growth prints one line, keeps the written prefix and re-captures the CUDA graph once for the new size.
 
 | Slots allocated | Memory | Audio |
 | --- | ---: | ---: |
@@ -213,7 +213,7 @@ The KV cache is sized per request, so the ceiling is not what the process holds:
 | 4096 | 448 MB | 5.2 min |
 | 8192 | 896 MB | 10.5 min |
 
-A 30 s file asks for `prompt + 256` slots, which rounds to 768; a 145 s file grows the buffer to 2560 in place, copying the written prefix and re-capturing the CUDA graph once for the new size. Requests beyond the ceiling raise a message with the value to set. Nothing is released after a long request, so a session settles at the largest capacity it needed.
+A 30 s file asks for `prompt + 256` slots, which rounds to 768; a 145 s file grows the buffer to 2560 in place, copying the written prefix and re-capturing the CUDA graph once for the new size. Nothing is released after a long request, so a session settles at the largest capacity it needed.
 
 What remains is the prefill profile. **Chunked prefill** would remove it: the prefill graph currently takes no cache input, which is what fixes `--max-seq`. Giving it `cache_k`/`cache_v`/`cache_len` the way the decode graph already has them — with a mask that keeps the prefix visible and the chunk causal — lets the prompt arrive in blocks of the profile size while the cache accumulates. The arithmetic is the same as one-shot prefill, so any WER change would come from fp16 reduction order and the tactics TensorRT picks per sequence length, not from the model. It also caps the quadratic attention cost of a long prompt at the block size.
 

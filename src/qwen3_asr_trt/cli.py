@@ -25,7 +25,7 @@ def _artifact_dir(model_id: str) -> Path:
 BACKENDS = ("bf16", "tensorrt-exllama", "tensorrt-w4a16")
 
 MAX_CACHE_HELP = (
-    "ceiling on the KV cache; the W4A16 decoder grows to fit each request"
+    "starting KV cache size; the W4A16 decoder grows past it to fit each request"
 )
 
 

@@ -103,12 +103,12 @@ native\build\qwen3-asr-native.exe `
 `--max-cache` mirror the Python flags. `QASR_TIMING=1` prints per-stage
 milliseconds per file, `QASR_BENCH=N` times the decode pieces.
 
-`--max-cache` is a floor here: at prefill the cache is sized to
-`prompt + max_new_tokens + 2` (rounded up to 512 slots), and a longer utterance
-reallocates it once, prints `[cache] growing KV cache ...`, and re-captures the
-decode graph. The Python runtime treats the same flag as a hard cap instead and
-raises `this request needs N KV slots but the decoder is capped at ...`. A slot
-costs 112 KB, so the 4096-slot default is 448 MB.
+`--max-cache` is a floor in both runtimes. At prefill the cache is sized to
+`prompt + max_new_tokens` (this runtime rounds up to 512 slots, the Python one to
+256), so a longer utterance reallocates it once, prints `[cache] growing KV
+cache ...`, and re-captures the decode graph; nothing is released afterwards, so
+a session settles at the largest capacity it needed. A slot costs 112 KB, so the
+4096-slot default is 448 MB when a request actually needs it.
 
 ## Input limits
 
