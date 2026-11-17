@@ -539,7 +539,12 @@ def main() -> None:
     if args.command == "transcribe":
         if not args.audio.is_file():
             parser.error(f"audio file not found: {args.audio}")
-        print(json.dumps({"text": transcriber.transcribe(args.audio, args.language)}, ensure_ascii=False))
+        text = transcriber.transcribe(args.audio, args.language)
+        payload = {"text": text}
+        detected = getattr(transcriber, "last_language", None)
+        if detected:
+            payload["language"] = detected
+        print(json.dumps(payload, ensure_ascii=False))
     else:
         aligner = None
         if args.aligner_model or args.aligner_engine or args.aligner_decoder_engine:

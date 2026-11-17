@@ -246,6 +246,11 @@ the engine file names carry the preset (`aligner-encoder-long.fp16.engine`).
 uv run qwen3-asr --model Qwen/Qwen3-ASR-1.7B-hf transcribe .\audio.wav --backend tensorrt-exllama --language Chinese
 ```
 
+Omitting `--language` lets the model detect it: the prompt carries no language
+tag and the printed JSON adds the detected language next to the text, e.g.
+`{"text": "...", "language": "English"}`. Audio of any sample rate is resampled
+to 16 kHz on load, and multi-channel files are averaged to mono.
+
 ## Benchmark one file
 
 ```powershell

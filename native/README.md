@@ -8,7 +8,7 @@ the packed INT4 decoder and tokenizer assets, and transcribes without PyTorch.
 | Stage | Implementation |
 | --- | --- |
 | TensorRT engine loading | C++ `nvinfer` API |
-| audio decode | libsndfile, loaded at run time |
+| audio decode | libsndfile, loaded at run time, plus a Kaiser-windowed sinc resampler |
 | log-mel | GPU kernel (windowed DFT, mel, log) or CPU `pocketfft` |
 | prompt assembly | prefix + audio placeholders + language suffix, from `tokenizer.bin` |
 | encoder + prefill | the published TensorRT engines |
@@ -113,6 +113,11 @@ native\build\qwen3-asr-native.exe `
 `--max-cache` mirror the Python flags. `QASR_TIMING=1` prints per-stage
 milliseconds per file, `QASR_BENCH=N` times the decode pieces.
 
+`--language` defaults to `auto`, which leaves the language tag out of the prompt
+and reports what the model detected (`{"text": ..., "language": "English"}`);
+naming a language forces it. Anything that is not 16 kHz is resampled on load,
+and multi-channel files are averaged to mono like the Python loader.
+
 `--max-cache` is the starting size in both runtimes, and both grow past it
 automatically: 512 slots (56 MB) in 512-slot steps. Sizing happens at prefill,
 from `prompt + max_new_tokens`, so a longer utterance
@@ -142,8 +147,10 @@ error: prompt of 2072 tokens (159.4 s of audio) exceeds this prefill engine's 20
 The prompt is `9` fixed tokens + one `<|audio_pad|>` per encoder token, where
 the audio tokens are `13` per second plus a short tail, and the suffix is
 `<|audio_end|><|im_end|>\n<|im_start|>assistant\nlanguage <L><asr_text>`; with
-`--language unset` the suffix is 3 tokens shorter. The generated text is capped
-by `--max-new-tokens` (256 by default), independent of the audio length.
+`--language auto` (the default) the suffix is 3 tokens shorter and the model's
+`language X<asr_text>` answer prefix is split off and reported. The generated
+text is capped by `--max-new-tokens` (256 by default), independent of the audio
+length.
 
 Serve the same endpoint the Python runtime exposes:
 
@@ -183,6 +190,10 @@ qwen3-asr-native.exe --align `
   --text "Stuff it into you his belly counseled him" audio.flac
 ```
 
+`--format srt|txt` and `--output FILE` mirror the Python flags and produce
+byte-identical subtitles. The JSON carries `timings` with `preprocessingMs`,
+`encoderMs`, `decoderMs`, `totalMs` plus `frames`, `tokens` and `words`.
+
 The output is `{"items": [{"text", "start_time", "end_time"}], "timings": {...}}`,
 free of PyTorch.
 
@@ -217,7 +228,6 @@ strong typing) changed nothing measurable, so the decoder runs at its limit.
 
 ## Not done yet
 
-- Audio must be 16 kHz; the Python path resamples with soxr.
-- `benchmark` and the HTTP server are Python-only.
+- `benchmark` is Python-only.
 - `--align` is CLI-only, and Japanese/Korean text falls back to per-character
   splitting (the Python path uses nagisa/soynlp when they are installed).

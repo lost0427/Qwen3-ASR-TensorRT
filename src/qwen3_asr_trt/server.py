@@ -123,7 +123,11 @@ def make_handler(
                     stream.write(audio)
                 with inference_lock:
                     text = transcriber.transcribe(temporary_path, language)
-                self._json(200, {"text": text})
+                    detected = getattr(transcriber, "last_language", None)
+                payload = {"text": text}
+                if detected:
+                    payload["language"] = detected
+                self._json(200, payload)
             except Exception:
                 logger.exception("Transcription request failed")
                 self._json(500, {"error": "transcription failed"})

@@ -80,6 +80,16 @@ def main() -> None:
             raise RuntimeError(f"prefix changed for {name}")
         suffix[name] = ids[last + 1 :]
 
+    # Automatic language detection: the prompt carries no language tag and the
+    # model answers with "language X<asr_text>" in front of the transcript.
+    ids = processor.apply_transcription_request(audio=silence, language=None)["input_ids"][0].tolist()
+    first = ids.index(audio_token)
+    last = len(ids) - 1 - ids[::-1].index(audio_token)
+    if prefix is not None and prefix != ids[:first]:
+        raise RuntimeError("prefix changed for automatic language detection")
+    prefix = ids[:first]
+    suffix["auto"] = ids[last + 1 :]
+
     with (out / "tokenizer.bin").open("wb") as handle:
         handle.write(struct.pack("<I", size))
         for row in tokens:

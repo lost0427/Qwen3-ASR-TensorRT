@@ -175,7 +175,9 @@ class TensorRTW4A16Transcriber:
         )
         self.embed = self.decoder.embed
         self.audio_token_id = 151676
+        self.asr_text_id = 151704
         self.max_new_tokens = max_new_tokens
+        self.last_language: str | None = None
         self.last_timings: dict[str, float] = {}
 
     def transcribe(self, audio_path: Path, language: str | None = None) -> str:
@@ -211,6 +213,16 @@ class TensorRTW4A16Transcriber:
         decode_ms = (time.perf_counter() - decode_start) * 1000
 
         text = self.processor.tokenizer.decode(tokens, skip_special_tokens=True)
+        # Without a forced language the model prefixes its answer with
+        # "language English<asr_text>"; keep the detected language and drop it.
+        self.last_language = None
+        if self.asr_text_id in tokens:
+            cut = tokens.index(self.asr_text_id)
+            prefix = self.processor.tokenizer.decode(tokens[:cut], skip_special_tokens=True).strip()
+            if prefix.lower().startswith("language"):
+                prefix = prefix[len("language"):].strip()
+            self.last_language = prefix or None
+            text = self.processor.tokenizer.decode(tokens[cut + 1:], skip_special_tokens=True)
         total_ms = (time.perf_counter() - total_start) * 1000
         self.last_timings = {
             "preprocessingMs": preprocessing_ms,

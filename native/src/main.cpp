@@ -1,11 +1,13 @@
 // Command line entry point: transcribes files, or serves the same HTTP endpoint
 // as the Python runtime.
 
+#include <algorithm>
 #include <chrono>
 #include <cctype>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <fstream>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -31,7 +33,7 @@ struct Options {
   std::string encoder;
   std::string decoder;
   std::string assets = "assets";
-  std::string language = "English";
+  std::string language = "auto";
   std::string mel_device = "auto";
   int max_new_tokens = 256;
   int max_cache = 512;
@@ -41,6 +43,8 @@ struct Options {
   std::string align_decoder;
   std::string text;
   std::string text_file;
+  std::string align_format = "json";
+  std::string output;
   std::string host = "127.0.0.1";
   int port = 8000;
   std::vector<std::string> audio;
@@ -54,6 +58,19 @@ struct Timer {
     return std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
   }
 };
+
+// SubRip timestamp: HH:MM:SS,mmm, matching the Python formatter.
+std::string srt_time(float seconds) {
+  long long total_ms = static_cast<long long>(std::llround(static_cast<double>(seconds) * 1000.0));
+  if (total_ms < 0) total_ms = 0;
+  const long long hours = total_ms / 3600000;
+  const long long minutes = (total_ms % 3600000) / 60000;
+  const long long secs = (total_ms % 60000) / 1000;
+  const long long millis = total_ms % 1000;
+  char buffer[32];
+  std::snprintf(buffer, sizeof(buffer), "%02lld:%02lld:%02lld,%03lld", hours, minutes, secs, millis);
+  return buffer;
+}
 
 std::string escape(const std::string& text) {
   std::string out;
@@ -93,7 +110,13 @@ class Transcriber {
     delete prefill_;
   }
 
-  void set_language(const std::string& language) { options_.language = language; }
+  void set_language(const std::string& language) {
+    std::string lower = language;
+    for (char& ch : lower) ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
+    options_.language = (lower.empty() || lower == "auto" || lower == "none") ? "auto" : language;
+  }
+
+  const std::string& last_language() const { return last_language_; }
 
   std::string process(const std::vector<float>& input, const char* label);
 
@@ -117,6 +140,7 @@ class Transcriber {
   void* embeddings_ = nullptr;
   size_t embeddings_bytes_ = 0;
   void* valid_ = nullptr;
+  std::string last_language_;
 };
 
 void Transcriber::ensure(size_t features_bytes, size_t mask_bytes, size_t pcm_bytes, size_t embeddings_bytes) {
@@ -197,12 +221,16 @@ std::string Transcriber::process(const std::vector<float>& input, const char* la
   audio_tokens += remainder;
   if (audio_tokens <= 0 || audio_tokens > encoded_tokens) throw std::runtime_error("bad audio token count");
 
-  const auto suffix = tokenizer_.suffix.find(options_.language);
-  if (suffix == tokenizer_.suffix.end()) throw std::runtime_error("unknown language: " + options_.language);
+  auto suffix = tokenizer_.suffix.find(options_.language);
+  if (suffix == tokenizer_.suffix.end()) suffix = tokenizer_.suffix.find("auto");
+  if (suffix == tokenizer_.suffix.end()) {
+    throw std::runtime_error("tokenizer.bin has no language suffix; regenerate the native assets");
+  }
+  const std::vector<int32_t>& suffix_ids = suffix->second;
   std::vector<int32_t> ids = tokenizer_.prefix;
   const int first_audio = static_cast<int>(ids.size());
   ids.insert(ids.end(), static_cast<size_t>(audio_tokens), tokenizer_.audio_token);
-  ids.insert(ids.end(), suffix->second.begin(), suffix->second.end());
+  ids.insert(ids.end(), suffix_ids.begin(), suffix_ids.end());
 
   Timer prefill_timer;
   (void)decoder_->prefill(*prefill_, ids, embeddings_, static_cast<int>(audio_tokens), first_audio,
@@ -224,7 +252,27 @@ std::string Transcriber::process(const std::vector<float>& input, const char* la
                  label, mel_ms, encoder_ms, prefill_ms, decode_ms, total_ms, frames, ids.size(),
                  produced.size());
   }
-  return qasr::decode_tokens(tokenizer_, produced);
+  last_language_.clear();
+  std::vector<int32_t> transcript = produced;
+  // With automatic language detection the model answers "language X<asr_text>"
+  // before the transcript; keep the language and drop the header.
+  constexpr int32_t kAsrText = 151704;
+  const auto marker = std::find(produced.begin(), produced.end(), kAsrText);
+  if (marker != produced.end()) {
+    const std::vector<int32_t> header(produced.begin(), marker);
+    std::string language = qasr::decode_tokens(tokenizer_, header);
+    const std::string tag = "language";
+    if (language.compare(0, tag.size(), tag) == 0) language = language.substr(tag.size());
+    while (!language.empty() && std::isspace(static_cast<unsigned char>(language.front()))) {
+      language.erase(language.begin());
+    }
+    while (!language.empty() && std::isspace(static_cast<unsigned char>(language.back()))) {
+      language.pop_back();
+    }
+    last_language_ = language;
+    transcript.assign(marker + 1, produced.end());
+  }
+  return qasr::decode_tokens(tokenizer_, transcript);
 }
 
 }  // namespace
@@ -278,6 +326,15 @@ int run(const std::vector<std::string>& args) {
       options.text = next();
     } else if (arg == "--text-file") {
       options.text_file = next();
+    } else if (arg == "--format") {
+      options.align_format = next();
+      if (options.align_format != "json" && options.align_format != "srt" &&
+          options.align_format != "txt") {
+        std::fprintf(stderr, "error: --format must be json, srt or txt\n");
+        return 2;
+      }
+    } else if (arg == "--output") {
+      options.output = next();
     } else if (arg == "--host") {
       options.host = next();
     } else if (arg == "--port") {
@@ -327,23 +384,49 @@ int run(const std::vector<std::string>& args) {
         qasr::AlignerTimings timings;
         const auto items = aligner.align(pcm, text, options.language, &timings);
 
-        std::string json = "{\"items\": [";
-        for (size_t i = 0; i < items.size(); ++i) {
-          char buffer[512];
-          std::snprintf(buffer, sizeof(buffer),
-                        "%s{\"text\": \"%s\", \"start_time\": %.3f, \"end_time\": %.3f}",
-                        i ? ", " : "", escape(items[i].text).c_str(), items[i].start, items[i].end);
-          json += buffer;
+        std::string output;
+        if (options.align_format == "srt") {
+          for (size_t i = 0; i < items.size(); ++i) {
+            char buffer[1024];
+            std::snprintf(buffer, sizeof(buffer), "%s%zu\n%s --> %s\n%s\n", i ? "\n" : "", i + 1,
+                          srt_time(items[i].start), srt_time(items[i].end), items[i].text.c_str());
+            output += buffer;
+          }
+          while (!output.empty() && (output.back() == '\n' || output.back() == '\r')) output.pop_back();
+        } else if (options.align_format == "txt") {
+          for (size_t i = 0; i < items.size(); ++i) {
+            char buffer[1024];
+            std::snprintf(buffer, sizeof(buffer), "%s%.3f\t%.3f\t%s", i ? "\n" : "", items[i].start,
+                          items[i].end, items[i].text.c_str());
+            output += buffer;
+          }
+        } else {
+          std::string json = "{\"items\": [";
+          for (size_t i = 0; i < items.size(); ++i) {
+            char buffer[512];
+            std::snprintf(buffer, sizeof(buffer),
+                          "%s{\"text\": \"%s\", \"start_time\": %.3f, \"end_time\": %.3f}",
+                          i ? ", " : "", escape(items[i].text).c_str(), items[i].start, items[i].end);
+            json += buffer;
+          }
+          char tail[640];
+          std::snprintf(tail, sizeof(tail),
+                        "], \"timings\": {\"preprocessingMs\": %.2f, \"melMs\": %.2f, "
+                        "\"encoderMs\": %.2f, \"decoderMs\": %.2f, \"totalMs\": %.2f, "
+                        "\"frames\": %d, \"tokens\": %d, \"words\": %d}}",
+                        timings.mel_ms, timings.mel_ms, timings.encoder_ms, timings.decoder_ms,
+                        timings.total_ms, timings.frames, timings.tokens, timings.words);
+          output = json + tail;
         }
-        char tail[512];
-        std::snprintf(tail, sizeof(tail),
-                      "], \"timings\": {\"melMs\": %.2f, \"encoderMs\": %.2f, \"decoderMs\": %.2f, "
-                      "\"totalMs\": %.2f, \"frames\": %d, \"tokens\": %d, \"words\": %d}}",
-                      timings.mel_ms, timings.encoder_ms, timings.decoder_ms, timings.total_ms,
-                      timings.frames, timings.tokens, timings.words);
-        json += tail;
-        std::printf("%s\n", json.c_str());
-        std::fflush(stdout);
+        if (!options.output.empty()) {
+          std::ofstream stream(options.output, std::ios::binary);
+          if (!stream) throw std::runtime_error("cannot write " + options.output);
+          stream << output;
+          if (options.align_format != "json") stream << "\n";
+        } else {
+          std::printf("%s\n", output.c_str());
+          std::fflush(stdout);
+        }
         if (timing_enabled()) {
           std::fprintf(stderr, "[time] %s mel %.2f encoder %.2f decoder %.2f total %.1f | frames %d tokens %d words %d\n",
                        path.c_str(), timings.mel_ms, timings.encoder_ms, timings.decoder_ms,
@@ -389,8 +472,16 @@ int run(const std::vector<std::string>& args) {
             int sample_rate = 0;
             const auto pcm = qasr::load_audio_memory(request.body.data(), request.body.size(), sample_rate);
             if (sample_rate != 16000) throw std::runtime_error("only 16 kHz audio is supported");
-            const auto items = aligner->align(pcm, text, language);
-            response.set_content("{\"items\": " + escape_json(items) + "}", "application/json");
+            qasr::AlignerTimings timings;
+            const auto items = aligner->align(pcm, text, language, &timings);
+            char tail[640];
+            std::snprintf(tail, sizeof(tail),
+                          ", \"timings\": {\"preprocessingMs\": %.2f, \"melMs\": %.2f, "
+                          "\"encoderMs\": %.2f, \"decoderMs\": %.2f, \"totalMs\": %.2f, "
+                          "\"frames\": %d, \"tokens\": %d, \"words\": %d}}",
+                          timings.mel_ms, timings.mel_ms, timings.encoder_ms, timings.decoder_ms,
+                          timings.total_ms, timings.frames, timings.tokens, timings.words);
+            response.set_content("{\"items\": " + escape_json(items) + tail, "application/json");
           } catch (const std::exception& error) {
             response.status = 400;
             response.set_content("{\"error\": \"" + escape(error.what()) + "\"}", "application/json");
@@ -407,7 +498,11 @@ int run(const std::vector<std::string>& args) {
           const auto pcm = qasr::load_audio_memory(request.body.data(), request.body.size(), sample_rate);
           if (sample_rate != 16000) throw std::runtime_error("only 16 kHz audio is supported");
           const std::string text = transcriber.process(pcm, "http");
-          response.set_content("{\"text\": \"" + escape(text) + "\"}", "application/json");
+          std::string json = "{\"text\": \"" + escape(text) + "\"";
+          if (!transcriber.last_language().empty()) {
+            json += ", \"language\": \"" + escape(transcriber.last_language()) + "\"";
+          }
+          response.set_content(json + "}", "application/json");
         } catch (const std::exception& error) {
           response.status = 400;
           response.set_content("{\"error\": \"" + escape(error.what()) + "\"}", "application/json");
@@ -426,7 +521,11 @@ int run(const std::vector<std::string>& args) {
       const auto pcm = qasr::load_audio(path, sample_rate);
       if (sample_rate != 16000) throw std::runtime_error("only 16 kHz audio is supported");
       const std::string text = transcriber.process(pcm, path.c_str());
-      std::printf("{\"text\": \"%s\"}\n", escape(text).c_str());
+      std::printf("{\"text\": \"%s\"", escape(text).c_str());
+      if (!transcriber.last_language().empty()) {
+        std::printf(", \"language\": \"%s\"", escape(transcriber.last_language()).c_str());
+      }
+      std::printf("}\n");
       std::fflush(stdout);
     }
     return 0;

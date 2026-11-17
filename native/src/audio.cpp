@@ -1,5 +1,7 @@
 #include "qasr.h"
 
+#include <algorithm>
+#include <cmath>
 #include <cstring>
 #include <fstream>
 #include <stdexcept>
@@ -11,6 +13,76 @@
 namespace qasr {
 
 namespace {
+
+// Kaiser-windowed sinc resampler. 32 taps with 512 phases keeps speech well
+// inside the passband and costs ~5 ms per 10 s of 44.1 kHz audio.
+constexpr int kHalfTaps = 16;
+constexpr int kPhases = 512;
+constexpr double pi = 3.14159265358979323846;
+
+double bessel_i0(double x) {
+  double sum = 1.0;
+  double term = 1.0;
+  const double half = x * 0.5;
+  for (int k = 1; k < 24; ++k) {
+    term *= (half / k) * (half / k);
+    sum += term;
+    if (term < 1e-12 * sum) break;
+  }
+  return sum;
+}
+
+std::vector<float> resample_to_16k(const std::vector<float>& input, int from_rate) {
+  if (from_rate == 16000 || input.empty()) return input;
+  const double ratio = 16000.0 / static_cast<double>(from_rate);
+  // Anti-alias cutoff in cycles per input sample, just under the lower Nyquist.
+  const double cutoff = 0.5 * (ratio < 1.0 ? ratio : 1.0) * 0.97;
+  const double beta = 8.6;
+  const double normalization = bessel_i0(beta);
+
+  std::vector<float> table(static_cast<size_t>(kPhases) * 2 * kHalfTaps);
+  for (int phase = 0; phase < kPhases; ++phase) {
+    const double frac = static_cast<double>(phase) / kPhases;
+    float* row = &table[static_cast<size_t>(phase) * 2 * kHalfTaps];
+    double sum = 0.0;
+    for (int k = -kHalfTaps; k < kHalfTaps; ++k) {
+      const double t = frac - k;
+      const double x = 2.0 * cutoff * t;
+      const double sinc = std::abs(x) < 1e-9 ? 1.0 : std::sin(pi * x) / (pi * x);
+      const double normalized = std::abs(t) / kHalfTaps;
+      double window = 0.0;
+      if (normalized < 1.0) {
+        window = bessel_i0(beta * std::sqrt(1.0 - normalized * normalized)) / normalization;
+      }
+      const double value = sinc * window * (2.0 * cutoff);
+      row[k + kHalfTaps] = static_cast<float>(value);
+      sum += value;
+    }
+    if (sum != 0.0) {
+      for (int i = 0; i < 2 * kHalfTaps; ++i) row[i] = static_cast<float>(row[i] / sum);
+    }
+  }
+
+  const size_t output_length =
+      static_cast<size_t>(std::llround(static_cast<double>(input.size()) * ratio));
+  std::vector<float> output(output_length);
+  const long long last = static_cast<long long>(input.size()) - 1;
+  for (size_t n = 0; n < output_length; ++n) {
+    const double position = static_cast<double>(n) / ratio;
+    const long long base = static_cast<long long>(std::floor(position));
+    const int phase = static_cast<int>((position - base) * kPhases);
+    const int safe_phase = phase < kPhases ? phase : kPhases - 1;
+    const float* row = &table[static_cast<size_t>(safe_phase) * 2 * kHalfTaps];
+    float accumulator = 0.0f;
+    for (int k = -kHalfTaps; k < kHalfTaps; ++k) {
+      const long long index = base + k;
+      if (index < 0 || index > last) continue;
+      accumulator += input[static_cast<size_t>(index)] * row[k + kHalfTaps];
+    }
+    output[n] = accumulator;
+  }
+  return output;
+}
 
 #ifdef _WIN32
 struct SndFileInfo {
@@ -101,7 +173,10 @@ std::vector<float> load_audio(const std::string& path, int& sample_rate) {
     for (int c = 0; c < info.channels; ++c) sum += interleaved[i * info.channels + c];
     mono[i] = sum / static_cast<float>(info.channels);
   }
-  return mono;
+  const int source_rate = info.samplerate;
+  std::vector<float> resampled = resample_to_16k(mono, source_rate);
+  sample_rate = resampled.size() == mono.size() ? source_rate : 16000;
+  return resampled;
 #else
   (void)path;
   (void)sample_rate;
@@ -163,7 +238,10 @@ std::vector<float> load_audio_memory(const void* data, size_t size, int& sample_
     for (int c = 0; c < info.channels; ++c) sum += interleaved[i * info.channels + c];
     mono[i] = sum / static_cast<float>(info.channels);
   }
-  return mono;
+  const int source_rate = info.samplerate;
+  std::vector<float> resampled = resample_to_16k(mono, source_rate);
+  sample_rate = resampled.size() == mono.size() ? source_rate : 16000;
+  return resampled;
 #else
   (void)data;
   (void)size;
