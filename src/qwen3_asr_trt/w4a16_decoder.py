@@ -247,7 +247,7 @@ class W4A16ASRDecoder:
         self,
         model_id: str,
         prefill_engine: Path,
-        max_cache: int = 4096,
+        max_cache: int = 512,
         group: int = 32,
         keep_fp16: frozenset[str] = frozenset(),
         growth_stride: int = 256,

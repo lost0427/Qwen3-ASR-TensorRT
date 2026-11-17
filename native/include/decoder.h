@@ -39,8 +39,10 @@ class Decoder {
 
  private:
   void allocate_cache(int capacity);
+  void allocate_kv(int capacity);
+  void build_rope_tables(int begin, int capacity);
   void allocate_scratch();
-  void free_cache();
+  void free_kv();
   void grow_cache(int needed);
   void enqueue_step();
   void capture();

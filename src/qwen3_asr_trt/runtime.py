@@ -152,7 +152,7 @@ class TensorRTW4A16Transcriber:
         prefill_engine: Path,
         encoder_engine: Path,
         max_new_tokens: int = 256,
-        max_cache: int = 4096,
+        max_cache: int = 512,
         group: int = 32,
     ) -> None:
         try:

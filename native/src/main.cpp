@@ -27,7 +27,7 @@ struct Options {
   std::string language = "English";
   std::string mel_device = "cuda";
   int max_new_tokens = 256;
-  int max_cache = 4096;
+  int max_cache = 512;
   bool serve = false;
   std::string host = "127.0.0.1";
   int port = 8000;

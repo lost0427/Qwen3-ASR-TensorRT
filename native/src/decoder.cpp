@@ -263,7 +263,7 @@ void Decoder::load_weights(const std::string& directory) {
   }
 }
 
-void Decoder::allocate_cache(int capacity) {
+void Decoder::allocate_kv(int capacity) {
   const int kv_dim = config_.kv_heads * config_.head_dim;
   for (int i = 0; i < config_.layers; ++i) {
     void* k = nullptr;
@@ -273,29 +273,62 @@ void Decoder::allocate_cache(int capacity) {
     cache_k_.push_back(k);
     cache_v_.push_back(v);
   }
+  cuda_check(cudaMalloc(&produced_dev_, static_cast<size_t>(capacity) * sizeof(int)), "cudaMalloc produced");
+}
 
+// Rebuilds the rotary table for [begin, capacity) and keeps the rows before
+// `begin`, so growing by one step does not recompute the whole table.
+void Decoder::build_rope_tables(int begin, int capacity) {
   const int head_dim = config_.head_dim;
+  const size_t row_bytes = static_cast<size_t>(head_dim) * 2;
   std::vector<float> inv_freq(head_dim / 2);
   for (int i = 0; i < head_dim / 2; ++i) {
     inv_freq[i] = 1.0f / std::pow(config_.rope_theta, static_cast<float>(2 * i) / head_dim);
   }
-  std::vector<__half> cos_table(static_cast<size_t>(capacity) * head_dim);
-  std::vector<__half> sin_table(static_cast<size_t>(capacity) * head_dim);
-  for (int pos = 0; pos < capacity; ++pos) {
+  const size_t rows = static_cast<size_t>(capacity - begin);
+  std::vector<__half> cos_rows(rows * head_dim);
+  std::vector<__half> sin_rows(rows * head_dim);
+  for (int pos = begin; pos < capacity; ++pos) {
+    const size_t base = static_cast<size_t>(pos - begin) * head_dim;
     for (int i = 0; i < head_dim / 2; ++i) {
       const float angle = static_cast<float>(pos) * inv_freq[i];
-      cos_table[static_cast<size_t>(pos) * head_dim + i] = __float2half(std::cos(angle));
-      cos_table[static_cast<size_t>(pos) * head_dim + head_dim / 2 + i] = __float2half(std::cos(angle));
-      sin_table[static_cast<size_t>(pos) * head_dim + i] = __float2half(std::sin(angle));
-      sin_table[static_cast<size_t>(pos) * head_dim + head_dim / 2 + i] = __float2half(std::sin(angle));
+      const __half cosine = __float2half(std::cos(angle));
+      const __half sine = __float2half(std::sin(angle));
+      cos_rows[base + i] = cosine;
+      cos_rows[base + head_dim / 2 + i] = cosine;
+      sin_rows[base + i] = sine;
+      sin_rows[base + head_dim / 2 + i] = sine;
     }
   }
-  cos_table_ = upload(cos_table.data(), cos_table.size() * 2);
-  sin_table_ = upload(sin_table.data(), sin_table.size() * 2);
-  cuda_check(cudaMalloc(&produced_dev_, static_cast<size_t>(capacity) * sizeof(int)), "cudaMalloc produced");
+  void* cos_new = nullptr;
+  void* sin_new = nullptr;
+  cuda_check(cudaMalloc(&cos_new, static_cast<size_t>(capacity) * row_bytes), "cudaMalloc cos table");
+  cuda_check(cudaMalloc(&sin_new, static_cast<size_t>(capacity) * row_bytes), "cudaMalloc sin table");
+  if (begin > 0 && cos_table_ && sin_table_) {
+    cuda_check(cudaMemcpy(cos_new, cos_table_, static_cast<size_t>(begin) * row_bytes, cudaMemcpyDeviceToDevice),
+               "copy cos table");
+    cuda_check(cudaMemcpy(sin_new, sin_table_, static_cast<size_t>(begin) * row_bytes, cudaMemcpyDeviceToDevice),
+               "copy sin table");
+  }
+  const size_t offset = static_cast<size_t>(begin) * row_bytes;
+  cuda_check(cudaMemcpy(static_cast<uint8_t*>(cos_new) + offset, cos_rows.data(), cos_rows.size() * 2,
+                        cudaMemcpyHostToDevice),
+             "upload cos table");
+  cuda_check(cudaMemcpy(static_cast<uint8_t*>(sin_new) + offset, sin_rows.data(), sin_rows.size() * 2,
+                        cudaMemcpyHostToDevice),
+             "upload sin table");
+  if (cos_table_) cudaFree(cos_table_);
+  if (sin_table_) cudaFree(sin_table_);
+  cos_table_ = cos_new;
+  sin_table_ = sin_new;
 }
 
-void Decoder::free_cache() {
+void Decoder::allocate_cache(int capacity) {
+  allocate_kv(capacity);
+  build_rope_tables(0, capacity);
+}
+
+void Decoder::free_kv() {
   for (void* pointer : cache_k_) {
     if (pointer) cudaFree(pointer);
   }
@@ -304,9 +337,9 @@ void Decoder::free_cache() {
   }
   cache_k_.clear();
   cache_v_.clear();
-  for (void** pointer : {&cos_table_, &sin_table_, &produced_dev_}) {
-    if (*pointer) cudaFree(*pointer);
-    *pointer = nullptr;
+  if (produced_dev_) {
+    cudaFree(produced_dev_);
+    produced_dev_ = nullptr;
   }
 }
 
@@ -317,8 +350,10 @@ void Decoder::grow_cache(int needed) {
   const int target = (needed + 511) / 512 * 512;
   std::fprintf(stderr, "[cache] growing KV cache %d -> %d slots for a %d-token request\n", capacity_, target,
                needed);
-  free_cache();
-  allocate_cache(target);
+  const int previous = capacity_;
+  free_kv();
+  allocate_kv(target);
+  build_rope_tables(previous, target);
   capacity_ = target;
   if (graph_exec_) {
     cudaGraphExecDestroy(static_cast<cudaGraphExec_t>(graph_exec_));

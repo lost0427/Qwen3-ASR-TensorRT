@@ -197,13 +197,13 @@ Three limits decide how much audio one call takes, and on the shipped engines th
 | --- | --- | ---: | ---: |
 | Encoder input | `qwen3-asr build --max-frames` | 3600 frames | 36 s |
 | Decoder prefill | `build-decoder-prefill --max-seq` | 512 tokens | 39 s |
-| KV cache | `transcribe --max-cache` | starting size, 4096 | 5.2 min and beyond |
+| KV cache | `transcribe --max-cache` | starting size, 512 | 18 s, grows past it |
 
 All three are memory, not compute. A 145 s file needs 14,500 mel frames and a 1,903-token prompt, so it fails on the encoder before the decoder sees it; rebuilding the encoder with `--max-frames 16000` gives a 610 MB engine, the same size as the 36 s one, and the file then transcribes in one pass: 14.9 s in total — 1.0 s preprocessing, 0.17 s encoder, 8.0 s prefill and 5.6 s decoding 477 tokens. Prefill is 12% of that pipeline on short utterances and 54% here, because attention grows with the square of the prompt. Either overrun names the knob and the value to rebuild with.
 
 The decoder side costs next to nothing in engine size — 512, 1024 and 2048 all produce a 2693.9 MB 1.7B engine — but TensorRT allocates activation buffers at the maximum profile shape, so a larger profile holds more memory at load time: the 2048 profile costs 238 MB more than the 512 one. Prefill measured 22.7, 24.8 and 24.3 ms on the same 100 utterances at 512, 1024 and 2048, with identical transcripts.
 
-The KV cache starts at `--max-cache` slots and grows past it when a request needs more, so the flag is a starting size, not a cap: `prompt + max_new_tokens` rounded up to the next 256 slots. Growth prints one line, keeps the written prefix and re-captures the CUDA graph once for the new size.
+The KV cache starts at `--max-cache` slots and grows past it when a request needs more, so the flag is a starting size, not a cap: `prompt + max_new_tokens` rounded up to the next 256 slots (the native runtime starts at 512 slots and rounds to 512). Growth prints one line, keeps the written prefix and re-captures the CUDA graph once for the new size.
 
 | Slots allocated | Memory | Audio |
 | --- | ---: | ---: |
