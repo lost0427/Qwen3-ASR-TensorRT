@@ -91,6 +91,7 @@ class Decoder {
   void* prefill_head_ = nullptr;
   void* prefill_k_ = nullptr;
   void* prefill_v_ = nullptr;
+  void* prefill_ptrs_ = nullptr;
   int prefill_seq_ = 0;
 };
 

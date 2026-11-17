@@ -24,7 +24,7 @@ transcripts are identical character for character:
 | Model | 100 test-clean utterances | Identical transcripts | Median per utterance |
 | --- | --- | --- | --- |
 | 0.6B | WER 1.5345% (1.6624% with CPU mel, same as Python) | 92 / 100 | 84 ms |
-| 1.7B | WER 1.1083% (same as Python) | 97 / 100 | 189 ms |
+| 1.7B | WER 1.1083% (same as Python) | 97 / 100 | 182 ms |
 
 The CPU and GPU mel paths agree on 94/100 transcripts for 0.6B and 98/100 for
 1.7B. The remaining differences against Python are punctuation and borderline
@@ -35,16 +35,18 @@ when fed the same mel.
 
 ## Speed
 
-Per-utterance medians from the same 100-utterance batch. 0.6B: mel 1.4 ms,
-encoder 5.3 ms, prefill 13.8 ms, decode 63.6 ms, total 84 ms; the Python run on
+Per-utterance medians from the same 100-utterance batch. 0.6B: mel 1.3 ms,
+encoder 4.9 ms, prefill 9.3 ms, decode 63.9 ms, total 83.5 ms; the Python run on
 the same utterances is mel+load 6.3 ms, encoder 6.2 ms, prefill 10.2 ms, decode
-62.4 ms, total 84.8 ms. Decode is at parity, preprocessing and encoder are
-faster, and prefill pays 3.6 ms for copying the KV cache into the per-layer
-buffers one head at a time. 1.7B: prefill 21.5 ms, decode 158.3 ms.
+62.4 ms, total 84.8 ms. Decode is at parity and the other stages are faster.
+1.7B: prefill 17.3 ms, decode 157.7 ms, total 181.9 ms.
 
 A micro-benchmark of one decode step (`QASR_BENCH=300`) puts the whole step at
-3.16 ms and the three kernels this runtime adds on top of the Python set at
-47 us: argmax 22 us, rotary row gather 17 us, token commit 8 us.
+3.16 ms, the three kernels this runtime adds on top of the Python set at 47 us
+(argmax 22 us, rotary row gather 17 us, token commit 8 us), and the prefill KV
+cache copy at 14 us for a typical prompt. That copy used to be 448 per-head
+`cudaMemcpy2D` calls and cost 4.1 ms per utterance; it is now one kernel that
+reads each row tile of `(seq, layers, kv_heads, head_dim)` once.
 
 Cold start to first transcript, including reading the packed INT4 weights and
 deserialising the engines: 2.3 s for 0.6B (0.6 GB of weights) and 5.7 s for

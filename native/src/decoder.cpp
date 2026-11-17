@@ -38,6 +38,9 @@ void commit_token_launch(const void* token, void* produced, void* generated, voi
                          cudaStream_t stream);
 void gather_row_launch(const void* table, const void* position, void* out, int head_dim,
                        cudaStream_t stream);
+void prefill_cache_copy_launch(const void* src_k, const void* src_v, void* dst_table, int layers,
+                               int kv_heads, int head_dim, int capacity, int seq,
+                               cudaStream_t stream);
 
 namespace qasr {
 
@@ -210,7 +213,8 @@ Decoder::~Decoder() {
   free_ptr(sin_table_);
   for (void** pointer : {&hidden_, &normed_, &qkv_buf_, &attended_, &gate_up_, &gated_, &logits_,
                          &token_dev_, &pos_dev_, &ids_dev_, &prompt_dev_, &prefill_head_, &prefill_k_,
-                         &prefill_v_, &produced_dev_, &generated_dev_, &cos_row_dev_, &sin_row_dev_}) {
+                         &prefill_v_, &produced_dev_, &generated_dev_, &cos_row_dev_, &sin_row_dev_,
+                         &positions_dev_, &prefill_ptrs_}) {
     free_ptr(*pointer);
   }
   if (stream_) cudaStreamDestroy(static_cast<cudaStream_t>(stream_));
@@ -363,25 +367,20 @@ int Decoder::prefill(Engine& engine, const std::vector<int32_t>& ids, const void
   cuda_check(cudaDeviceSynchronize(), "prefill sync");
 
   // Source layout is (seq, layers, kv_heads, head_dim); the runtime buffer is
-  // (kv_heads, capacity, head_dim), so each head needs its own row copy.
-  const int head_dim = config_.head_dim;
-  const int kv_heads = config_.kv_heads;
-  const size_t source_pitch = static_cast<size_t>(config_.layers) * kv_dim * 2;
-  const size_t dest_pitch = static_cast<size_t>(head_dim) * 2;
+  // (kv_heads, capacity, head_dim), so one kernel does the per-head row copy.
+  std::vector<void*> destination(static_cast<size_t>(config_.layers) * 2);
   for (int layer = 0; layer < config_.layers; ++layer) {
-    for (int head = 0; head < kv_heads; ++head) {
-      const size_t source_offset = (static_cast<size_t>(layer) * kv_heads + head) * head_dim * 2;
-      const size_t dest_offset = static_cast<size_t>(head) * capacity_ * head_dim * 2;
-      cuda_check(cudaMemcpy2D(static_cast<uint8_t*>(cache_k_[layer]) + dest_offset, dest_pitch,
-                              static_cast<const uint8_t*>(prefill_k_) + source_offset, source_pitch,
-                              head_dim * 2, seq, cudaMemcpyDeviceToDevice),
-                 "copy cache k");
-      cuda_check(cudaMemcpy2D(static_cast<uint8_t*>(cache_v_[layer]) + dest_offset, dest_pitch,
-                              static_cast<const uint8_t*>(prefill_v_) + source_offset, source_pitch,
-                              head_dim * 2, seq, cudaMemcpyDeviceToDevice),
-                 "copy cache v");
-    }
+    destination[static_cast<size_t>(layer)] = cache_k_[layer];
+    destination[static_cast<size_t>(config_.layers) + static_cast<size_t>(layer)] = cache_v_[layer];
   }
+  if (!prefill_ptrs_) {
+    cuda_check(cudaMalloc(&prefill_ptrs_, destination.size() * sizeof(void*)), "cudaMalloc cache table");
+  }
+  cuda_check(cudaMemcpyAsync(prefill_ptrs_, destination.data(), destination.size() * sizeof(void*),
+                             cudaMemcpyHostToDevice, static_cast<cudaStream_t>(stream_)),
+             "copy cache table");
+  prefill_cache_copy_launch(prefill_k_, prefill_v_, prefill_ptrs_, config_.layers, config_.kv_heads,
+                            config_.head_dim, capacity_, seq, static_cast<cudaStream_t>(stream_));
 
   if (const char* dump = std::getenv("QASR_DUMP")) {
     std::vector<__half> host(8);
@@ -585,6 +584,12 @@ void Decoder::bench(int iterations) {
     commit_token_launch(token_dev_, produced_dev_, generated_dev_, pos_dev_, stream);
   });
   run("graph replay (step)", [&] { cudaGraphLaunch(static_cast<cudaGraphExec_t>(graph_exec_), stream); });
+  if (prefill_ptrs_ && prefill_seq_ > 0) {
+    run("prefill cache copy", [&] {
+      prefill_cache_copy_launch(prefill_k_, prefill_v_, prefill_ptrs_, config_.layers,
+                                config_.kv_heads, config_.head_dim, capacity_, prefill_seq_, stream);
+    });
+  }
 
   cudaEventDestroy(start);
   cudaEventDestroy(stop);
