@@ -49,6 +49,18 @@ void Engine::set_shape(const char* tensor, nvinfer1::Dims value) {
 
 nvinfer1::Dims Engine::shape_after(const char* tensor) const { return context_->getTensorShape(tensor); }
 
+int Engine::profile_max(const char* tensor, int dimension) const {
+  if (!engine_ || dimension < 0 || dimension >= nvinfer1::Dims::MAX_DIMS) return 0;
+  // Fully static tensors report their own shape; dynamic ones report -1.
+  const nvinfer1::Dims shape = engine_->getTensorShape(tensor);
+  if (dimension < shape.nbDims && shape.d[dimension] > 0) return shape.d[dimension];
+  if (engine_->getNbOptimizationProfiles() == 0) return 0;
+  const nvinfer1::Dims upper =
+      engine_->getProfileShape(tensor, 0, nvinfer1::OptProfileSelector::kMAX);
+  if (dimension >= upper.nbDims || upper.d[dimension] <= 0) return 0;
+  return upper.d[dimension];
+}
+
 void Engine::bind(const char* tensor, void* pointer) {
   if (!context_->setTensorAddress(tensor, pointer)) {
     throw std::runtime_error(std::string("setTensorAddress failed for ") + tensor);

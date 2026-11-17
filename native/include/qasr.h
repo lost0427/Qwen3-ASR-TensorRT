@@ -27,6 +27,8 @@ class Engine {
   nvinfer1::Dims dims(int index) const;
   nvinfer1::DataType dtype(int index) const;
   void set_shape(const char* name, nvinfer1::Dims value);
+  // Upper bound of a dynamic dimension from the build profile, 0 if there is none.
+  int profile_max(const char* name, int dimension) const;
   // Shape resolved by the context after the inputs were set (for dynamic outputs).
   nvinfer1::Dims shape_after(const char* name) const;
   void bind(const char* name, void* pointer);

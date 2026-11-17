@@ -23,7 +23,7 @@ transcripts are identical character for character:
 
 | Model | 100 test-clean utterances | Identical transcripts | Median per utterance |
 | --- | --- | --- | --- |
-| 0.6B | WER 1.5345% (1.6624% with CPU mel, same as Python) | 92 / 100 | 84 ms |
+| 0.6B | WER 1.5345% (1.6624% with CPU mel, same as Python) | 92 / 100 | 79 ms |
 | 1.7B | WER 1.1083% (same as Python) | 97 / 100 | 182 ms |
 
 The CPU and GPU mel paths agree on 94/100 transcripts for 0.6B and 98/100 for
@@ -36,15 +36,15 @@ when fed the same mel.
 ## Speed
 
 Per-utterance medians from the same 100-utterance batch. 0.6B: mel 1.3 ms,
-encoder 4.9 ms, prefill 9.3 ms, decode 63.9 ms, total 83.5 ms; the Python run on
+encoder 4.4 ms, prefill 8.3 ms, decode 63.0 ms, total 78.5 ms; the Python run on
 the same utterances is mel+load 6.3 ms, encoder 6.2 ms, prefill 10.2 ms, decode
 62.4 ms, total 84.8 ms. Decode is at parity and the other stages are faster.
-1.7B: prefill 17.3 ms, decode 157.7 ms, total 181.9 ms.
+1.7B: prefill 16.6 ms, decode 158.0 ms, total 182.2 ms.
 
 A micro-benchmark of one decode step (`QASR_BENCH=300`) puts the whole step at
-3.16 ms, the three kernels this runtime adds on top of the Python set at 47 us
-(argmax 22 us, rotary row gather 17 us, token commit 8 us), and the prefill KV
-cache copy at 14 us for a typical prompt. That copy used to be 448 per-head
+3.16 ms, the three kernels this runtime adds on top of the Python set at 44 us
+(argmax 21 us, rotary row gather 15 us, token commit 7 us), and the prefill KV
+cache copy at 13 us for a typical prompt. That copy used to be 448 per-head
 `cudaMemcpy2D` calls and cost 4.1 ms per utterance; it is now one kernel that
 reads each row tile of `(seq, layers, kv_heads, head_dim)` once.
 
@@ -102,6 +102,35 @@ native\build\qwen3-asr-native.exe `
 `--mel-device cpu` selects the pocketfft front end, `--max-new-tokens` and
 `--max-cache` mirror the Python flags. `QASR_TIMING=1` prints per-stage
 milliseconds per file, `QASR_BENCH=N` times the decode pieces.
+
+`--max-cache` is a floor here: at prefill the cache is sized to
+`prompt + max_new_tokens + 2` (rounded up to 512 slots), and a longer utterance
+reallocates it once, prints `[cache] growing KV cache ...`, and re-captures the
+decode graph. The Python runtime treats the same flag as a hard cap instead and
+raises `this request needs N KV slots but the decoder is capped at ...`. A slot
+costs 112 KB, so the 4096-slot default is 448 MB.
+
+## Input limits
+
+| Engine set | Audio ceiling | Binding limit |
+| --- | ---: | --- |
+| `encoder-window-win` + any prefill | 36.0 s | encoder profile, 3600 frames |
+| `encoder-long-160s` + `decoder-prefill-2048` | 156.2 s | prefill profile, 2048 tokens |
+| `encoder-long-160s` + prefill rebuilt at `--max-seq 2112` | 160.0 s | encoder profile, 16000 frames |
+
+Both runtimes compute the mel for the whole file, pad the mel axis to a multiple
+of 100 frames and reject over-long input instead of truncating:
+
+```text
+error: audio of 4000 frames (40.0 s) exceeds this encoder's 3600-frame profile (36.0 s); rebuild it with `qwen3-asr build --max-frames 4000`
+error: prompt of 2072 tokens (159.4 s of audio) exceeds this prefill engine's 2048-token profile; rebuild it with `qwen3-asr build-decoder-prefill --max-seq 2072`
+```
+
+The prompt is `9` fixed tokens + one `<|audio_pad|>` per encoder token, where
+the audio tokens are `13` per second plus a short tail, and the suffix is
+`<|audio_end|><|im_end|>\n<|im_start|>assistant\nlanguage <L><asr_text>`; with
+`--language unset` the suffix is 3 tokens shorter. The generated text is capped
+by `--max-new-tokens` (256 by default), independent of the audio length.
 
 Serve the same endpoint the Python runtime exposes:
 

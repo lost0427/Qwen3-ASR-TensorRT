@@ -27,7 +27,7 @@ struct Options {
   std::string language = "English";
   std::string mel_device = "cuda";
   int max_new_tokens = 256;
-  int max_cache = 2048;
+  int max_cache = 4096;
   bool serve = false;
   std::string host = "127.0.0.1";
   int port = 8000;
@@ -127,6 +127,15 @@ std::string Transcriber::process(const std::vector<float>& input, const char* la
 
   int valid_frames = 0;
   const int frames = qasr::mel_frame_count(static_cast<int>(pcm.size()), mel_assets_.hop, 100, valid_frames);
+  const int encoder_max = encoder_->profile_max("input_features", 2);
+  if (encoder_max > 0 && frames > encoder_max) {
+    char message[512];
+    std::snprintf(message, sizeof(message),
+                  "audio of %d frames (%.1f s) exceeds this encoder's %d-frame profile (%.1f s); "
+                  "rebuild it with `qwen3-asr build --max-frames %d`",
+                  frames, frames / 100.0, encoder_max, encoder_max / 100.0, frames);
+    throw std::runtime_error(message);
+  }
   const size_t mel_bytes = static_cast<size_t>(frames) * mel_assets_.n_mel * 4;
 
   Timer mel_timer;
@@ -179,7 +188,8 @@ std::string Transcriber::process(const std::vector<float>& input, const char* la
   ids.insert(ids.end(), suffix->second.begin(), suffix->second.end());
 
   Timer prefill_timer;
-  (void)decoder_->prefill(*prefill_, ids, embeddings_, static_cast<int>(audio_tokens), first_audio);
+  (void)decoder_->prefill(*prefill_, ids, embeddings_, static_cast<int>(audio_tokens), first_audio,
+                          options_.max_new_tokens);
   const double prefill_ms = prefill_timer.ms();
 
   if (std::getenv("QASR_BENCH")) decoder_->bench(std::atoi(std::getenv("QASR_BENCH")));

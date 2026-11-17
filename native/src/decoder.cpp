@@ -184,9 +184,10 @@ Decoder::Decoder(const std::string& directory, int max_cache) {
                  config_.hidden, config_.layers, config_.heads, config_.kv_heads, config_.head_dim,
                  config_.intermediate, config_.vocab, config_.eps, config_.rope_theta);
   }
-  capacity_ = max_cache;
+  capacity_ = max_cache < 512 ? 512 : max_cache;
   load_weights(directory);
   allocate_cache(capacity_);
+  allocate_scratch();
 }
 
 Decoder::~Decoder() {
@@ -291,7 +292,46 @@ void Decoder::allocate_cache(int capacity) {
   }
   cos_table_ = upload(cos_table.data(), cos_table.size() * 2);
   sin_table_ = upload(sin_table.data(), sin_table.size() * 2);
+  cuda_check(cudaMalloc(&produced_dev_, static_cast<size_t>(capacity) * sizeof(int)), "cudaMalloc produced");
+}
 
+void Decoder::free_cache() {
+  for (void* pointer : cache_k_) {
+    if (pointer) cudaFree(pointer);
+  }
+  for (void* pointer : cache_v_) {
+    if (pointer) cudaFree(pointer);
+  }
+  cache_k_.clear();
+  cache_v_.clear();
+  for (void** pointer : {&cos_table_, &sin_table_, &produced_dev_}) {
+    if (*pointer) cudaFree(*pointer);
+    *pointer = nullptr;
+  }
+}
+
+void Decoder::grow_cache(int needed) {
+  if (needed <= capacity_) return;
+  // Grow in fixed steps so a batch only reallocates when a longer utterance
+  // shows up, and never lose the captured graph with stale pointers.
+  const int target = (needed + 511) / 512 * 512;
+  std::fprintf(stderr, "[cache] growing KV cache %d -> %d slots for a %d-token request\n", capacity_, target,
+               needed);
+  free_cache();
+  allocate_cache(target);
+  capacity_ = target;
+  if (graph_exec_) {
+    cudaGraphExecDestroy(static_cast<cudaGraphExec_t>(graph_exec_));
+    graph_exec_ = nullptr;
+  }
+  if (graph_) {
+    cudaGraphDestroy(static_cast<cudaGraph_t>(graph_));
+    graph_ = nullptr;
+  }
+}
+
+void Decoder::allocate_scratch() {
+  const int head_dim = config_.head_dim;
   cuda_check(cudaMalloc(&hidden_, config_.hidden * 2), "cudaMalloc hidden");
   cuda_check(cudaMalloc(&normed_, config_.hidden * 2), "cudaMalloc normed");
   cuda_check(cudaMalloc(&qkv_buf_, (config_.heads + 2 * config_.kv_heads) * head_dim * 2), "cudaMalloc qkv");
@@ -304,15 +344,29 @@ void Decoder::allocate_cache(int capacity) {
   cuda_check(cudaStreamCreate(reinterpret_cast<cudaStream_t*>(&stream_)), "cudaStreamCreate");
   cuda_check(cudaMalloc(&cos_row_dev_, static_cast<size_t>(head_dim) * 2), "cudaMalloc cos row");
   cuda_check(cudaMalloc(&sin_row_dev_, static_cast<size_t>(head_dim) * 2), "cudaMalloc sin row");
-  cuda_check(cudaMalloc(&produced_dev_, static_cast<size_t>(capacity) * sizeof(int)), "cudaMalloc produced");
   cuda_check(cudaMalloc(&generated_dev_, sizeof(int)), "cudaMalloc generated");
 }
 
 int Decoder::prefill(Engine& engine, const std::vector<int32_t>& ids, const void* audio, int audio_count,
-                     int first_audio) {
+                     int first_audio, int reserve_tokens) {
   const int seq = static_cast<int>(ids.size());
   const int hidden = config_.hidden;
   const int kv_dim = config_.kv_heads * config_.head_dim;
+  // Reject prompts the prefill engine cannot take before touching any buffer.
+  const int prefill_max = engine.profile_max("inputs_embeds", 1);
+  if (prefill_max > 0 && seq > prefill_max) {
+    char message[512];
+    std::snprintf(message, sizeof(message),
+                  "prompt of %d tokens (%.1f s of audio) exceeds this prefill engine's %d-token "
+                  "profile; rebuild it with `qwen3-asr build-decoder-prefill --max-seq %d`",
+                  seq, seq / 13.0, prefill_max, seq);
+    throw std::runtime_error(message);
+  }
+  // The cache must cover the prompt plus everything the decode loop may add.
+  grow_cache(seq + reserve_tokens + 2);
+  if (seq > capacity_) {
+    throw std::runtime_error("prompt of " + std::to_string(seq) + " tokens does not fit the KV cache");
+  }
   if (seq > prefill_seq_) {
     // Buffers sized for an earlier, shorter prompt have to grow.
     if (prompt_dev_) cudaFree(prompt_dev_);

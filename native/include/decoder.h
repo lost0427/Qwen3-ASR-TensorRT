@@ -25,9 +25,10 @@ class Decoder {
   int position() const { return position_; }
 
   // Builds the prompt embeddings on the host and runs the prefill engine.
-  // Returns the first generated token.
+  // `reserve_tokens` sizes the KV cache so the decode loop cannot run out of
+  // slots; the cache grows in place if the prompt plus that reserve does not fit.
   int prefill(Engine& engine, const std::vector<int32_t>& ids, const void* audio, int audio_count,
-              int first_audio);
+              int first_audio, int reserve_tokens);
   // Runs the decode loop on the device: the step is captured into a CUDA graph
   // and replayed `chunk` times before the host reads the tokens back.
   std::vector<int32_t> decode(int max_new_tokens, int chunk = 8);
@@ -38,6 +39,9 @@ class Decoder {
 
  private:
   void allocate_cache(int capacity);
+  void allocate_scratch();
+  void free_cache();
+  void grow_cache(int needed);
   void enqueue_step();
   void capture();
   void load_weights(const std::string& directory);
