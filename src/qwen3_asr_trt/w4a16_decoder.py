@@ -217,6 +217,19 @@ class _TRTPrefill:
         # Engines exported with include_lm_head=False emit the final normed hidden
         # state and the runtime applies the INT4 output projection itself.
         self.emits_logits = "logits" in outputs
+        # A graph quantized for Q/DQ keeps float32 activations, so its bindings can
+        # differ from the fp16 the decoder carries.
+        self.torch_dtypes = {
+            trt.DataType.FLOAT: torch.float32,
+            trt.DataType.HALF: torch.float16,
+            trt.DataType.BF16: torch.bfloat16,
+        }
+        self.input_dtype = self.torch_dtypes.get(
+            engine.get_tensor_dtype("inputs_embeds"), torch.float16
+        )
+        self.output_dtype = self.torch_dtypes.get(
+            engine.get_tensor_dtype("logits" if self.emits_logits else "hidden"), torch.float16
+        )
         profile = engine.get_tensor_profile_shape("inputs_embeds", 0)
         self.max_seq = int(profile[2][1]) if profile else 0
 
@@ -229,12 +242,13 @@ class _TRTPrefill:
                 f"{self.max_seq}-token profile; rebuild it with "
                 f"`qwen3-asr build-decoder-prefill --max-seq {seq}`"
             )
-        embeds = inputs_embeds.contiguous()
+        embeds = inputs_embeds.to(self.input_dtype).contiguous()
         positions = torch.arange(seq, device="cuda").unsqueeze(0)
         head_name = "logits" if self.emits_logits else "hidden"
         head_width = vocab if self.emits_logits else hidden_size
-        head = torch.empty((1, 1, head_width), dtype=torch.float16, device="cuda")
-        cache_k = torch.empty((seq, layers, kv_heads, head_dim), dtype=torch.float16, device="cuda")
+        head = torch.empty((1, 1, head_width), dtype=self.output_dtype, device="cuda")
+        cache_k = torch.empty((seq, layers, kv_heads, head_dim), dtype=self.output_dtype,
+                              device="cuda")
         cache_v = torch.empty_like(cache_k)
         self.context.set_input_shape("inputs_embeds", (1, seq, embeds.shape[-1]))
         self.context.set_input_shape("position_ids", (1, seq))
@@ -516,6 +530,8 @@ class W4A16ASRDecoder:
             inputs_embeds, self.layers, self.kv_heads, self.head_dim, self.vocab,
             hidden_size=self.hidden,
         )
+        if head.dtype != torch.float16:
+            head = head.to(torch.float16)
         logits = head if self.prefill.emits_logits else self.lm_head(head)
         seq = cache_k.shape[0]
         for index in range(self.layers):

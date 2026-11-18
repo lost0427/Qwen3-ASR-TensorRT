@@ -132,7 +132,7 @@ def export_asr_decoder(
     import torch
     from transformers import AutoModelForMultimodalLM
 
-    dtype = {"fp16": torch.float16, "bf16": torch.bfloat16}[precision]
+    dtype = {"fp16": torch.float16, "bf16": torch.bfloat16, "fp32": torch.float32}[precision]
     model = AutoModelForMultimodalLM.from_pretrained(
         model_id, dtype=dtype, device_map="cpu", low_cpu_mem_usage=True
     )

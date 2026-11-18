@@ -78,11 +78,12 @@ def encode_pass(size: str, rows) -> tuple[list[dict], list[float]]:
     return outputs, timings
 
 
-def build_decoder(size: str):
+def build_decoder(size: str, prefill: Path | None = None):
     from qwen3_asr_trt.w4a16_decoder import W4A16ASRDecoder
 
     config = SIZES[size]
-    return W4A16ASRDecoder(str(config["packed"]), Path(config["prefill"]), max_cache=1024, group=32)
+    return W4A16ASRDecoder(str(config["packed"]), Path(prefill or config["prefill"]),
+                           max_cache=1024, group=32)
 
 
 def prompt(decoder, record) -> torch.Tensor:
@@ -97,6 +98,8 @@ def main() -> None:
     parser.add_argument("--limit", type=int, default=64)
     parser.add_argument("--min-seconds", type=float, default=0.0,
                         help="keep only utterances at least this long")
+    parser.add_argument("--draft-prefill", type=Path,
+                        help="override the draft prefill engine (for example an INT8 build)")
     parser.add_argument("--adapter", type=Path,
                         help="project the target's audio embeddings into the draft's space "
                              "instead of running the small encoder")
@@ -133,7 +136,7 @@ def main() -> None:
         targets, target_encoder = encode_pass("1.7b", rows)
     print(f"encoder passes: {time.perf_counter() - started:.1f} s", flush=True)
 
-    draft_decoder = build_decoder("0.6b")
+    draft_decoder = build_decoder("0.6b", args.draft_prefill)
     target_decoder = build_decoder("1.7b")
     print(f"resident: {torch.cuda.memory_allocated() / 2**30:.2f} GiB", flush=True)
 
@@ -277,6 +280,7 @@ def main() -> None:
             + item["targetPrefillMs"] + item["specMs"]
             for index, item in enumerate(results)), 1),
         "peakGiB": round(torch.cuda.max_memory_allocated() / 2**30, 2),
+        "deviceFreeMiB": round(torch.cuda.mem_get_info()[0] / 2**20),
         "adapter": str(args.adapter) if args.adapter else None,
     }
     print(json.dumps(summary, indent=2))
