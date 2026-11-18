@@ -132,7 +132,18 @@ def main() -> None:
     if not prepared.is_file():
         from onnxruntime.quantization.shape_inference import quant_pre_process
 
-        quant_pre_process(str(fp32_onnx), str(prepared), skip_symbolic_shape=False)
+        # A 1.7B graph is over the 2 GB protobuf limit, so its tensors have to stay
+        # in an external file.
+        large = fp32_onnx.stat().st_size + (work / "asr-prefill.onnx.data").stat().st_size > 2**31
+        quant_pre_process(
+            str(fp32_onnx),
+            str(prepared),
+            skip_symbolic_shape=False,
+            save_as_external_data=large,
+            all_tensors_to_one_file=True,
+            external_data_location="asr-prefill.prepared.onnx.data",
+            external_data_size_threshold=1024,
+        )
     print(f"prepared graph {prepared.stat().st_size / 2**20:.0f} MiB", flush=True)
 
     quantize_static(

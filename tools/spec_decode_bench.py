@@ -100,6 +100,8 @@ def main() -> None:
                         help="keep only utterances at least this long")
     parser.add_argument("--draft-prefill", type=Path,
                         help="override the draft prefill engine (for example an INT8 build)")
+    parser.add_argument("--target-prefill", type=Path,
+                        help="override the target prefill engine")
     parser.add_argument("--adapter", type=Path,
                         help="project the target's audio embeddings into the draft's space "
                              "instead of running the small encoder")
@@ -137,7 +139,7 @@ def main() -> None:
     print(f"encoder passes: {time.perf_counter() - started:.1f} s", flush=True)
 
     draft_decoder = build_decoder("0.6b", args.draft_prefill)
-    target_decoder = build_decoder("1.7b")
+    target_decoder = build_decoder("1.7b", args.target_prefill)
     print(f"resident: {torch.cuda.memory_allocated() / 2**30:.2f} GiB", flush=True)
 
     # Self-check: the target's own next tokens must all be accepted by `verify`.
