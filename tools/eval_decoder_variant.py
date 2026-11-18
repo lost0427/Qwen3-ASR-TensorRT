@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import statistics
 import sys
 import time
@@ -20,7 +21,7 @@ sys.path.insert(0, str(ROOT / "src"))
 BENCH = ROOT.parent / "ASRbenchmark"
 sys.path.insert(0, str(BENCH / "tools"))
 
-DATA = Path(r"C:\Users\z1\Documents\ASR-data\ls")
+DATA = Path(os.environ.get("QASR_AUDIO_ROOT", r"C:\Users\z1\Documents\ASR-data\ls"))
 
 SIZES = {
     "0.6b": {

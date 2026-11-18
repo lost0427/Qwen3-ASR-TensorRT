@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import math
 import sys
 from pathlib import Path
@@ -29,7 +30,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from prune_decoder import calibration_files  # noqa: E402
 
-DATA = Path(r"C:\Users\z1\Documents\ASR-data\ls")
+DATA = Path(os.environ.get("QASR_AUDIO_ROOT", r"C:\Users\z1\Documents\ASR-data\ls"))
 CACHE = ROOT / "artifacts/experiments/teacher-topk.pt"
 
 

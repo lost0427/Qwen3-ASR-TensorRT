@@ -20,7 +20,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 BENCH = ROOT.parent / "ASRbenchmark"
-DATA = Path(r"C:\Users\z1\Documents\ASR-data\ls")
+DATA = Path(os.environ.get("QASR_AUDIO_ROOT", r"C:\Users\z1\Documents\ASR-data\ls"))
 BINARY = ROOT / "native/build/qwen3-asr-native.exe"
 
 VARIANTS = {

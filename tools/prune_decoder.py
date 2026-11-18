@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import random
 import shutil
 import statistics
@@ -24,7 +25,7 @@ from pathlib import Path
 import torch
 
 ROOT = Path(__file__).resolve().parents[1]
-DATA = Path(r"C:\Users\z1\Documents\ASR-data\ls")
+DATA = Path(os.environ.get("QASR_AUDIO_ROOT", r"C:\Users\z1\Documents\ASR-data\ls"))
 
 
 def calibration_files(limit: int, seed: int) -> list[Path]:

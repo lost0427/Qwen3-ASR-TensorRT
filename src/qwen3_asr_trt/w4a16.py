@@ -27,6 +27,20 @@ _SOURCES = [
 _extension = None
 
 
+def _arch_flags() -> list[str]:
+    """Match the kernels to the GPU they will run on."""
+    try:
+        import torch
+
+        if not torch.cuda.is_available():
+            return []
+        major, minor = torch.cuda.get_device_capability()
+    except Exception:
+        return []
+    arch = f"{major}{minor}"
+    return [f"--generate-code=arch=compute_{arch},code=sm_{arch}"]
+
+
 def extension():
     """Compile (once) and return the CUDA extension."""
     global _extension
@@ -37,7 +51,7 @@ def extension():
     _extension = load(
         name="w4a16_gemv",
         sources=[str(path) for path in _SOURCES],
-        extra_cuda_cflags=["-O3", "--use_fast_math", "--generate-code=arch=compute_89,code=sm_89"],
+        extra_cuda_cflags=["-O3", "--use_fast_math", *_arch_flags()],
         verbose=False,
     )
     return _extension
