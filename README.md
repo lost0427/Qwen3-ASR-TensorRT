@@ -541,9 +541,18 @@ both paths.
 
 It still does not fit cleanly: the target decoder, prefill engine and encoder take
 5.39 GiB of the 6.94 GiB a fresh context sees, and the draft decoder plus prefill
-take the remaining 1.55 GiB, leaving 0 MiB. Freeing one of the two large engines is
-the remaining step: an INT4 target prefill is 0.89 GiB instead of 2.57 (its WER on
-the 1.7B is unmeasured), or an INT8 encoder halves the 1.16 GiB tower.
+take the remaining 1.55 GiB, leaving 0 MiB. Three ways to free the ~0.4 GiB were
+checked. An INT4 prefill for the target would save 1.7 GiB, but this repo has no
+supported path for quantizing the decoder prefill ONNX (only the encoder has
+`quantize-encoder`). The INT8 encoder is 311 MB instead of 610, but the calibrated
+width-pinned engine is limited to an 800-frame profile and rebuilding it for the
+full 3,600 frames failed in the builder, so it saves 0.28 GiB at best. The pruned
+`ffn875-refit` target saves 0.32 GiB and leaves 12 MiB free, which is the same
+place: the card is fully committed.
+
+So the adapter configuration needs roughly 0.4 GiB that this build cannot find; on
+a 12 GB card it runs as measured, and on 8 GB it needs either a quantized decoder
+prefill or the pruned target.
 
 The native runtime now has the same batched verify (`Decoder::verify`, built from
 `csrc/w4a16_gemm.cu` and `csrc/verify_ops.cu`); its self-check accepts 3 of 3 of

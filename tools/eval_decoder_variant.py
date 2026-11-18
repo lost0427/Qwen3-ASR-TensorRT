@@ -51,6 +51,7 @@ def main() -> None:
     parser.add_argument("--experiment", help="name under artifacts/experiments")
     parser.add_argument("--packed", type=Path, help="packed decoder directory (overrides --experiment)")
     parser.add_argument("--prefill", type=Path, help="prefill engine (overrides --experiment)")
+    parser.add_argument("--encoder", type=Path, help="audio encoder engine override")
     parser.add_argument("--limit", type=int, default=0, help="0 evaluates every utterance")
     parser.add_argument("--output", type=Path)
     args = parser.parse_args()
@@ -60,7 +61,9 @@ def main() -> None:
     experiment = ROOT / "artifacts/experiments" / args.experiment if args.experiment else None
     packed = args.packed or experiment / "packed"
     prefill = args.prefill or experiment / "prefill/asr-prefill.fp16.engine"
-    size = SIZES[args.size]
+    size = dict(SIZES[args.size])
+    if args.encoder:
+        size["encoder"] = args.encoder
 
     rows = [json.loads(line) for line in (BENCH / "data/manifest.jsonl").read_text(encoding="utf-8").splitlines()]
     rows = [row for row in rows if (DATA / row["flac"]).is_file()]
