@@ -225,6 +225,12 @@ def main() -> None:
     output.mkdir(parents=True, exist_ok=True)
     save_file(tensors, str(output / "model.safetensors"))
     del tensors
+    # Keep the channel plan so a refit or a distillation run reproduces exactly
+    # the same weights.
+    save_file(
+        {f"kept.{index}": kept[index].to(torch.int64).contiguous() for index in range(layers)},
+        str(output / "prune_plan.safetensors"),
+    )
 
     target_text = raw[config_key]["text_config"] if config_key else raw["text_config"]
     target_text["intermediate_size"] = int(keep)
