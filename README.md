@@ -365,3 +365,61 @@ boundaries are exactly equal to the official output.
 ![Aligner comparison](docs/windows-librispeech-qwen3-aligner-comparison.png)
 
 ![Aligner median latency by stage](docs/windows-librispeech-qwen3-aligner-stage-latency.png)
+
+## Pruning and speculative decoding
+
+Branch `experiments/prune-spec` holds two attempts at making the 1.7B decoder
+cheaper. Every calibration and tuning decision reads train-clean-100 only;
+test-clean stays an evaluation set.
+
+### Structured pruning
+
+`tools/prune_decoder.py` ranks FFN channels by the mean absolute `down_proj`
+input weighted by that channel's `down_proj` column norm, and ranks layers by the
+KL divergence of the next-token distribution when a block is skipped. The
+statistics come from real ASR prompts, audio tokens included, built from
+train-clean-100 with the TensorRT encoder. Calibrating on text-only sentences
+instead selected channels the audio positions do not use: that model answered
+`<|im_end|>` for every clip even though its FP16 weights loaded cleanly.
+
+Each variant is packed to INT4 at group 32 and gets its own prefill engine.
+
+| Variant | Change | Packed | WER (2620) | Decode ms/token | Decode |
+| --- | --- | ---: | ---: | ---: | ---: |
+| baseline | 28 layers, FFN 6144 | 1517 MB | 1.98% | 6.93 | — |
+| ffn75 | 28 layers, FFN 4608 | 1375 MB | 3.16% | 6.04 | −12.9% |
+| depth26 | layers 11, 12 dropped | 1463 MB | 2.91% | 6.54 | −5.5% |
+| depth26b | layers 3, 25 dropped | 1463 MB | 3.35% | 6.45 | −6.9% |
+
+WER is the full 2,620-utterance corpus. Decode rates are medians of two
+interleaved native passes over 300 utterances (`tools/compare_native_variants.py`),
+so they compare to each other rather than to the table above; the two passes
+agreed to within 0.5%. `ffn75` and the two depth variants use their own engines,
+so prefill time moves with them as well.
+
+None of the three variants stays within the acceptance bound of +0.15 WER
+points. Width pruning buys the most decode for the least WER, about one decode
+point per 0.11 WER points, but it still needs recovery training; pruning without
+it is not usable at this scale.
+
+### Speculative decoding
+
+`tools/spec_decode_bench.py` drafts four tokens with the 0.6B decoder and verifies
+them with the 1.7B decoder in a single batched pass. `W4A16ASRDecoder.verify`
+replays the whole block through a captured CUDA graph, and `csrc/w4a16_gemm.cu`
+reads each INT4 weight once for all rows of the block. Greedy verification is
+exact: 32 of 32 transcripts are identical to the target's own greedy decode.
+
+| | |
+| --- | --- |
+| Accepted draft tokens | 91.5% |
+| Tokens per round | 4.66 |
+| Median, 32 utterances | 174.1 ms speculative, 154.6 ms target only |
+| Peak GPU memory | 2.37 GiB, both decoders resident with the encoders already released |
+
+On this 8 GB laptop it is 13% slower than plain decoding. The 0.6B draft costs
+0.54 target-steps per token, so a round spends 2.2 target-steps drafting and 3.1
+verifying to produce 4.66 tokens. Break-even needs the verify at 2.5 target-steps.
+A bandwidth-bound batched GEMM would reach that; the current kernel is limited by
+re-reading the five activation rows once per output feature, which measured 3-5x
+the single-row kernel instead of the ideal 1.0x.
