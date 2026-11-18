@@ -12,6 +12,14 @@ void w4a16_gemv_launch(const void* x, const void* qweight, const void* scales,
 void w4a16_gemm_launch(const void* x, const void* qweight, const void* scales,
                        const void* residual, void* y, int rows, int k, int m_rows, int group,
                        cudaStream_t stream);
+void qk_norm_rope_rows_launch(void* vectors, int row_stride, int offset, const void* weight,
+                              const void* cos, const void* sin, int rows, int heads, int head_dim,
+                              float eps, cudaStream_t stream);
+void silu_mul_rows_launch(const void* gate_up, void* out, int rows, int width,
+                          cudaStream_t stream);
+void verify_attention_launch(const void* q, int q_stride, const void* k_cache, const void* v_cache,
+                             const void* position, void* out, int rows, int heads, int head_dim,
+                             int capacity, int groups, cudaStream_t stream);
 void qk_norm_rope_launch(void* vectors, const void* weight, const void* cos, const void* sin,
                          int heads, int head_dim, float eps, cudaStream_t stream);
 void silu_mul_launch(const void* gate_up, void* out, int width, cudaStream_t stream);
@@ -77,6 +85,40 @@ torch::Tensor w4a16_gemm(torch::Tensor x, torch::Tensor qweight, torch::Tensor s
   w4a16_gemm_launch(x_contiguous.data_ptr(), qweight.data_ptr(), scales.data_ptr(), residual_ptr,
                     y.data_ptr(), rows, k, m, group, c10::cuda::getCurrentCUDAStream().stream());
   return y;
+}
+
+void qk_norm_rope_rows(torch::Tensor qkv, torch::Tensor q_weight, torch::Tensor k_weight,
+                       torch::Tensor cos, torch::Tensor sin, int64_t rows, int64_t q_dim,
+                       int64_t k_dim, int64_t heads_q, int64_t heads_k, double eps) {
+  const int head_dim = static_cast<int>(q_weight.numel());
+  const int row_stride = static_cast<int>(q_dim + 2 * k_dim);
+  auto stream = c10::cuda::getCurrentCUDAStream().stream();
+  qk_norm_rope_rows_launch(qkv.data_ptr(), row_stride, 0, q_weight.data_ptr(),
+                           cos.data_ptr(), sin.data_ptr(), static_cast<int>(rows),
+                           static_cast<int>(heads_q), head_dim, static_cast<float>(eps), stream);
+  qk_norm_rope_rows_launch(qkv.data_ptr(), row_stride, static_cast<int>(q_dim),
+                           k_weight.data_ptr(), cos.data_ptr(), sin.data_ptr(),
+                           static_cast<int>(rows), static_cast<int>(heads_k), head_dim,
+                           static_cast<float>(eps), stream);
+}
+
+torch::Tensor silu_mul_rows(torch::Tensor gate_up, int64_t rows, int64_t width) {
+  auto out = torch::empty({1, rows, width}, gate_up.options());
+  silu_mul_rows_launch(gate_up.data_ptr(), out.data_ptr(), static_cast<int>(rows),
+                       static_cast<int>(width), c10::cuda::getCurrentCUDAStream().stream());
+  return out;
+}
+
+torch::Tensor verify_attention(torch::Tensor qkv, int64_t q_stride, torch::Tensor k_cache,
+                               torch::Tensor v_cache, torch::Tensor position, int64_t rows,
+                               int64_t heads, int64_t head_dim, int64_t groups) {
+  auto out = torch::empty({1, rows, heads * head_dim}, qkv.options());
+  verify_attention_launch(qkv.data_ptr(), static_cast<int>(q_stride), k_cache.data_ptr(),
+                          v_cache.data_ptr(), position.data_ptr(), out.data_ptr(),
+                          static_cast<int>(rows), static_cast<int>(heads),
+                          static_cast<int>(head_dim), static_cast<int>(k_cache.size(2)),
+                          static_cast<int>(groups), c10::cuda::getCurrentCUDAStream().stream());
+  return out;
 }
 
 void qk_norm_rope(torch::Tensor q, torch::Tensor k, torch::Tensor q_weight,
@@ -153,6 +195,9 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("gemv", &w4a16_gemv, "W4A16 GEMV (decode step)");
   m.def("gemv_residual", &w4a16_gemv_residual, "W4A16 GEMV with residual add");
   m.def("gemm", &w4a16_gemm, "W4A16 batched GEMM (speculative verification)");
+  m.def("qk_norm_rope_rows", &qk_norm_rope_rows, "row-batched q/k RMSNorm + RoPE (in place)");
+  m.def("silu_mul_rows", &silu_mul_rows, "row-batched silu(gate) * up");
+  m.def("verify_attention", &verify_attention, "batched causal GQA attention for verification");
   m.def("qk_norm_rope", &qk_norm_rope, "fused q/k RMSNorm + RoPE (in place)");
   m.def("silu_mul", &silu_mul, "fused silu(gate) * up");
   m.def("attention", &decode_attention, "single-query decode attention with device length");

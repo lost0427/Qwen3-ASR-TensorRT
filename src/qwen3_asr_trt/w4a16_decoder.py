@@ -569,10 +569,13 @@ class W4A16ASRDecoder:
         """Reset the cache length and the next input token.
 
         Cache rows at or after `position` are stale; the next step overwrites
-        them, so a rejected speculative block costs no extra copy.
+        them, so a rejected speculative block costs no extra copy. The produced
+        counter restarts too, so a draft that runs ahead never overruns its
+        token buffer.
         """
         self._pos.fill_(position)
         self._token.fill_(token)
+        self._generated.zero_()
 
     def _rope(self, x: Tensor, cos: Tensor, sin: Tensor) -> Tensor:
         half = self.head_dim // 2
@@ -585,42 +588,39 @@ class W4A16ASRDecoder:
         )
 
     def _verify_step(self, rows: int) -> None:
-        """One batched target step; every length comes from the device position."""
+        """One batched target step over ``rows`` tokens."""
         torch = self.torch
-        F = torch.nn.functional
-        offsets = torch.arange(rows, device="cuda", dtype=torch.long)
-        positions = self._pos + offsets
-        cos = self.cos_table.index_select(0, positions).unsqueeze(0).unsqueeze(0)
-        sin = self.sin_table.index_select(0, positions).unsqueeze(0).unsqueeze(0)
+        ext = extension()
+        positions = self._pos + torch.arange(rows, device="cuda", dtype=torch.long)
+        cos = self.cos_table.index_select(0, positions)
+        sin = self.sin_table.index_select(0, positions)
 
         hidden = self.embed[self._v_ids[:, :rows]]
         q_dim = self.heads * self.head_dim
         k_dim = self.kv_heads * self.head_dim
-        # The mask covers the whole cache so its shape never changes: attention
-        # cost is negligible next to the weight reads.
-        total = self.capacity
-        allowed = torch.arange(total, device="cuda").unsqueeze(0) <= positions.unsqueeze(1)
-        mask = torch.zeros((1, 1, rows, total), dtype=torch.float16, device="cuda")
-        mask = mask.masked_fill(~allowed, torch.finfo(torch.float16).min)
+        qkv_dim = q_dim + 2 * k_dim
 
         for index in range(self.layers):
             normed = self.in_norm[index](hidden)
             qkv = self.qkv[index].gemm(normed)
-            q = qkv[..., :q_dim].view(1, rows, self.heads, self.head_dim).transpose(1, 2)
+            ext.qk_norm_rope_rows(
+                qkv, self.q_norm[index].weight, self.k_norm[index].weight, cos, sin,
+                rows, q_dim, k_dim, self.heads, self.kv_heads, self.eps,
+            )
             k = qkv[..., q_dim:q_dim + k_dim].view(1, rows, self.kv_heads, self.head_dim).transpose(1, 2)
             v = qkv[..., q_dim + k_dim:].view(1, rows, self.kv_heads, self.head_dim).transpose(1, 2)
-            q = self._rope(self.q_norm[index](q), cos, sin)
-            k = self._rope(self.k_norm[index](k), cos, sin)
             self.cache_k[index].index_copy_(2, positions, k)
             self.cache_v[index].index_copy_(2, positions, v)
-            attended = F.scaled_dot_product_attention(
-                q, self.cache_k[index], self.cache_v[index], attn_mask=mask, enable_gqa=True
+            # The kernel reads the sequence length from `_pos`, so one graph
+            # serves every position and no length bucketing is needed.
+            attended = ext.verify_attention(
+                qkv, qkv_dim, self.cache_k[index], self.cache_v[index], self._pos,
+                rows, self.heads, self.head_dim, self.groups,
             )
-            attended = attended.transpose(1, 2).reshape(1, rows, q_dim)
             hidden = self.o_proj[index].gemm(attended, hidden)
             normed = self.post_norm[index](hidden)
             gate_up = self.gu[index].gemm(normed)
-            gated = F.silu(gate_up[..., :self.intermediate]) * gate_up[..., self.intermediate:]
+            gated = ext.silu_mul_rows(gate_up, rows, self.intermediate)
             hidden = self.down[index].gemm(gated, hidden)
 
         logits = self.lm_head.gemm(self.final_norm(hidden))

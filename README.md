@@ -422,24 +422,35 @@ are identical to the target's own greedy decode.
 | --- | ---: | ---: |
 | Accepted draft tokens | 91.5% | 95.7% |
 | Tokens per round | 4.66 | 4.83 |
-| Decode | 114.2 / 126.2 ms (−9.5%) | 319.6 / 328.0 ms (−2.6%) |
-| Decoder stage, prefill + decode | 122.7 / 132.7 ms (−7.5%) | 335.7 / 334.8 ms (+0.3%) |
-| Full pipeline with the draft model | 154.8 / 132.7 ms (+16.7%) | 406.9 / 334.8 ms (+21.5%) |
+| Decode | 115.9 / 152.4 ms (1.31x) | 319.6 / 328.0 ms (1.03x) |
+| Decoder stage, prefill + decode | 126.8 / 161.5 ms (−21.5%) | 335.7 / 334.8 ms (+0.3%) |
+| Full pipeline with the draft model | 162.2 / 161.6 ms (+0.4%) | 406.9 / 334.8 ms (+21.5%) |
 | Transcripts identical to greedy | 32 / 32 | 12 / 12 |
-| Peak GPU memory | 2.37 GiB | 2.37 GiB |
+| Peak GPU memory | 2.35 GiB | 2.37 GiB |
 
-The verify reads the 1.7B weights once for the whole block, so a round costs
-about 2.6 target-steps to check and 1.9 to draft, and produces 4.66 tokens. That
-is where the 9.5% comes from, and it is bounded by the batched GEMM: at five rows
-it is 1.6x the single-row kernel instead of the ideal 1.0x. The gain shrinks on
-longer audio because both models re-read a longer cache: a round issues nine
+A round costs about 1.6 target-steps to verify and 1.9 to draft, and produces 4.66
+tokens; the draft spends 2.39 ms per token against the target's 5.10, and the
+verify 8.31 ms against 5.10. Three things make the verify cost more than the
+single-row step it replaces: the batched GEMM runs at 1.5–1.7x the single-row
+rate because it re-reads the block's activations once per output row, the layer
+still needs about fifteen small kernel launches, and attention scans the live
+length even though the kernel takes it from the device position.
+
+Sweeping the draft length in one process, so clock drift hits every K equally,
+puts the optimum at four:
+
+| K | 1 | 2 | 3 | 4 | 5 | 6 | 7 |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| Speedup | 1.00x | 1.00x | 1.18x | **1.28x** | 1.05x | 1.14x | 0.96x |
+
+Past four the batch grows to six or more rows, the GEMM loses more to register
+pressure than the extra candidates return, and acceptance per proposed token falls
+from 0.91 to 0.63.
+
+End to end the pairing only breaks even on short audio: the draft model needs its
+own audio encoder and prefill, 22.8 ms per utterance, against the 35.7 ms the
+pairing saves. The 0.6B draft cannot share the target's prompt embeddings, since
+the two audio towers project to different widths, so a two-model pair always pays
+two encoders. On long audio the gain shrinks as well, because a round issues nine
 queries (four draft, five verify) against the target's 4.66, so the attention
 share of the step grows with context even though acceptance improves.
-
-End to end the pairing loses, because the draft model needs its own audio encoder
-and prefill: 19.4 ms per short utterance and 36.4 ms per long one, against 10.5
-and 8.4 ms saved. The 0.6B draft cannot share the target's prompt embeddings,
-since the two audio towers project to different widths, so a two-model pair
-always pays two encoders. Making this pay would need a draft that reuses the
-target's prompt, which in practice means early exit inside the target rather than
-a second model.

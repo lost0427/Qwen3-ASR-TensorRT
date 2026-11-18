@@ -167,6 +167,7 @@ def main() -> None:
             # Mirror the target's state without a host round-trip.
             draft_decoder._pos.copy_(target_decoder._pos)
             draft_decoder._token.copy_(target_decoder._token)
+            draft_decoder._generated.zero_()
             for _ in range(args.draft_tokens):
                 draft_graph.replay()
             torch.cuda.synchronize()
