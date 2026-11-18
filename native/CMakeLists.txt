@@ -24,6 +24,8 @@ add_executable(qwen3-asr-native
   src/mel_gpu.cu
   src/prefill_copy.cu
   ../csrc/w4a16_kernel.cu
+  ../csrc/w4a16_gemm.cu
+  ../csrc/verify_ops.cu
   ../csrc/decode_attention.cu
   ../csrc/decode_fusions.cu
 )

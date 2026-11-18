@@ -448,6 +448,13 @@ address. A production attempt would need the student to train on its own
 trajectories (on-policy), or much larger data, and would still have to beat the
 closed-form refit before it is worth the compute.
 
+The measurement that would justify on-policy work is the per-token agreement on
+the teacher's own transcripts: ffn875 + refit agrees with the teacher on 97.7% of
+5,059 positions. That leaves 2.3% per token, which compounds to roughly a 38%
+chance of a clean 42-token transcript, so the gap is partly per-token quality and
+partly drift. On-policy training targets the drift half; whether that closes the
+remaining 0.06 points to the acceptance bound is unknown and was not attempted.
+
 ### Speculative decoding
 
 `tools/spec_decode_bench.py` drafts four tokens with the 0.6B decoder and verifies
@@ -493,3 +500,24 @@ the two audio towers project to different widths, so a two-model pair always pay
 two encoders. On long audio the gain shrinks as well, because a round issues nine
 queries (four draft, five verify) against the target's 4.66, so the attention
 share of the step grows with context even though acceptance improves.
+
+Two follow-ups were measured and are recorded as negative results. **Self
+speculation** (drafting with the target's first N layers, which would share the
+encoder and the prompt) is not available: the hidden state after layer N pushed
+through the final norm and the tied output projection agrees with the full
+model's argmax on only 0.5% of transcript positions at N=8, 1.4% at N=12, 5.6% at
+N=16 and 41.8% at N=20. Those layers were never trained to be predictive, so early
+exit cannot draft here.
+
+**Two resident models do not fit.** Of 8 GiB, 6.94 GiB is usable; the 1.7B
+decoder, its prefill engine and its encoder already hold 5.4 GiB, and loading the
+0.6B decoder and prefill leaves zero bytes free before its encoder is even
+allocated. The benchmark above works only because it encodes every utterance in
+two separate passes and releases the encoders before the timed loop. A single-shot
+pipeline would have to overcommit and page.
+
+The native runtime now has the same batched verify (`Decoder::verify`, built from
+`csrc/w4a16_gemm.cu` and `csrc/verify_ops.cu`); its self-check accepts 3 of 3 of
+the target's own tokens, so the batched kernels agree with the single-token path.
+Wiring it into a two-model driver is blocked by the memory above, not by the
+kernels.

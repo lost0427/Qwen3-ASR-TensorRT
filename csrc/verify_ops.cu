@@ -35,6 +35,24 @@ __device__ __forceinline__ void block_sum_broadcast(float& value, float* scratch
   __syncthreads();
 }
 
+__global__ void rmsnorm_rows_kernel(const __half* __restrict__ x, const __half* __restrict__ weight,
+                                    __half* __restrict__ out, int hidden, float eps) {
+  __shared__ float scratch[32];
+  const int row = blockIdx.x;
+  const __half* src = x + static_cast<long long>(row) * hidden;
+  __half* dst = out + static_cast<long long>(row) * hidden;
+  float sum = 0.f;
+  for (int i = threadIdx.x; i < hidden; i += blockDim.x) {
+    const float value = __half2float(src[i]);
+    sum += value * value;
+  }
+  block_sum_broadcast(sum, scratch);
+  const float scale = rsqrtf(sum / hidden + eps);
+  for (int i = threadIdx.x; i < hidden; i += blockDim.x) {
+    dst[i] = __float2half(__half2float(src[i]) * scale * __half2float(weight[i]));
+  }
+}
+
 // One block per (row, head): RMS-normalise the head vector, scale by the head
 // norm weight and apply rotary embedding in place.
 __global__ void qk_norm_rope_rows_kernel(__half* __restrict__ vectors,
@@ -78,6 +96,25 @@ __global__ void silu_mul_rows_kernel(const __half* __restrict__ gate_up,
   const float up = __half2float(src[width + index]);
   out[static_cast<long long>(row) * width + index] =
       __float2half(gate / (1.f + __expf(-gate)) * up);
+}
+
+// Appends `rows` tokens starting at `base_position` to a per-layer KV cache laid
+// out as (kv_heads, capacity, head_dim). Source rows are laid out as
+// (rows, kv_dim) with an explicit stride.
+__global__ void cache_write_rows_kernel(__half* __restrict__ k_cache, __half* __restrict__ v_cache,
+                                        const __half* __restrict__ k, const __half* __restrict__ v,
+                                        int base_position, int src_stride, int kv_dim, int head_dim,
+                                        int capacity) {
+  const int row = blockIdx.y;
+  const int index = blockIdx.x * blockDim.x + threadIdx.x;
+  if (index >= kv_dim) return;
+  const int head = index / head_dim;
+  const int depth = index % head_dim;
+  const long long destination = static_cast<long long>(head) * capacity * head_dim +
+                                static_cast<long long>(base_position + row) * head_dim + depth;
+  const long long source = static_cast<long long>(row) * src_stride + index;
+  k_cache[destination] = k[source];
+  v_cache[destination] = v[source];
 }
 
 __device__ __forceinline__ float warp_max(float value) {
@@ -189,6 +226,13 @@ __global__ void verify_attention_kernel(const __half* __restrict__ q, int q_stri
 
 }  // namespace
 
+void rmsnorm_rows_launch(const void* x, const void* weight, void* out, int rows, int hidden,
+                         float eps, cudaStream_t stream) {
+  rmsnorm_rows_kernel<<<rows, 256, 0, stream>>>(
+      reinterpret_cast<const __half*>(x), reinterpret_cast<const __half*>(weight),
+      reinterpret_cast<__half*>(out), hidden, eps);
+}
+
 void qk_norm_rope_rows_launch(void* vectors, int row_stride, int offset, const void* weight,
                               const void* cos, const void* sin, int rows, int heads, int head_dim,
                               float eps, cudaStream_t stream) {
@@ -218,4 +262,15 @@ void verify_attention_launch(const void* q, int q_stride, const void* k_cache, c
       reinterpret_cast<const __half*>(q), q_stride, reinterpret_cast<const __half*>(k_cache),
       reinterpret_cast<const __half*>(v_cache), reinterpret_cast<const int64_t*>(position),
       reinterpret_cast<__half*>(out), head_dim, capacity, groups);
+}
+
+void cache_write_rows_launch(void* k_cache, void* v_cache, const void* k, const void* v,
+                             int base_position, int src_stride, int rows, int kv_dim, int head_dim,
+                             int capacity, cudaStream_t stream) {
+  const int threads = 128;
+  dim3 grid((kv_dim + threads - 1) / threads, rows);
+  cache_write_rows_kernel<<<grid, threads, 0, stream>>>(
+      reinterpret_cast<__half*>(k_cache), reinterpret_cast<__half*>(v_cache),
+      reinterpret_cast<const __half*>(k), reinterpret_cast<const __half*>(v),
+      base_position, src_stride, kv_dim, head_dim, capacity);
 }

@@ -33,6 +33,20 @@ class Decoder {
   // and replayed `chunk` times before the host reads the tokens back.
   std::vector<int32_t> decode(int max_new_tokens, int chunk = 8);
 
+  // ---- speculative decoding ------------------------------------------------
+
+  // Resets the cache length, the next input token and the produced counter so a
+  // draft block can start from a prefix the target accepted.
+  void reset(int position, int32_t token);
+  // Replays the captured step `count` times and returns the tokens it produced.
+  std::vector<int32_t> draft(int count);
+  // Runs the target over `candidates` in one batched pass, appends the accepted
+  // tokens plus the target's correction or bonus token, and returns how many
+  // candidates matched.
+  int verify(const std::vector<int32_t>& candidates);
+  // Returns everything the produced buffer holds so far.
+  std::vector<int32_t> produced();
+
   // Times the pieces of a decode step so the gap against the Python runtime can
   // be attributed instead of guessed.
   void bench(int iterations);
@@ -47,6 +61,7 @@ class Decoder {
   void enqueue_step();
   void capture();
   void load_weights(const std::string& directory);
+  void allocate_verify(int rows);
 
   ModelConfig config_;
   int capacity_ = 0;
@@ -99,6 +114,21 @@ class Decoder {
   void* prefill_v_ = nullptr;
   void* prefill_ptrs_ = nullptr;
   int prefill_seq_ = 0;
+
+  // Batched verification scratch, sized for at most 8 rows (7 draft tokens).
+  int verify_rows_ = 0;
+  void* v_ids_ = nullptr;
+  void* v_positions_ = nullptr;
+  void* v_hidden_ = nullptr;
+  void* v_normed_ = nullptr;
+  void* v_qkv_ = nullptr;
+  void* v_attended_ = nullptr;
+  void* v_gate_up_ = nullptr;
+  void* v_gated_ = nullptr;
+  void* v_logits_ = nullptr;
+  void* v_predicted_ = nullptr;
+  void* v_cos_ = nullptr;
+  void* v_sin_ = nullptr;
 };
 
 }  // namespace qasr

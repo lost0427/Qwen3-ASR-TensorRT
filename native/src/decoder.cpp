@@ -28,6 +28,24 @@ void decode_attention_launch(const void* q, const void* k_cache, const void* v_c
                              void* out, int heads, int head_dim, int max_cache, int groups,
                              cudaStream_t stream);
 
+// Batched verification kernels (csrc/verify_ops.cu, csrc/w4a16_gemm.cu).
+void w4a16_gemm_launch(const void* x, const void* qweight, const void* scales, const void* residual,
+                       void* y, int rows, int k, int m_rows, int group, cudaStream_t stream);
+void rmsnorm_rows_launch(const void* x, const void* weight, void* out, int rows, int hidden,
+                         float eps, cudaStream_t stream);
+void qk_norm_rope_rows_launch(void* vectors, int row_stride, int offset, const void* weight,
+                              const void* cos, const void* sin, int rows, int heads, int head_dim,
+                              float eps, cudaStream_t stream);
+void silu_mul_rows_launch(const void* gate_up, void* out, int rows, int width,
+                          cudaStream_t stream);
+void cache_write_rows_launch(void* k_cache, void* v_cache, const void* k, const void* v,
+                             int base_position, int src_stride, int rows, int kv_dim, int head_dim,
+                             int capacity, cudaStream_t stream);
+void verify_attention_launch(const void* q, int q_stride, const void* k_cache, const void* v_cache,
+                             const void* position, void* out, int rows, int heads, int head_dim,
+                             int capacity, int groups, cudaStream_t stream);
+void argmax_rows_launch(const void* logits, int rows, int columns, void* out, cudaStream_t stream);
+
 // Kernels this runtime adds (ops.cu).
 void rmsnorm_launch(const void* x, const void* weight, void* out, int n, float eps, cudaStream_t stream);
 void embed_launch(void* out, const void* table, const void* ids, int count, int hidden, cudaStream_t stream);
@@ -215,7 +233,9 @@ Decoder::~Decoder() {
   for (void** pointer : {&hidden_, &normed_, &qkv_buf_, &attended_, &gate_up_, &gated_, &logits_,
                          &token_dev_, &pos_dev_, &ids_dev_, &prompt_dev_, &prefill_head_, &prefill_k_,
                          &prefill_v_, &produced_dev_, &generated_dev_, &cos_row_dev_, &sin_row_dev_,
-                         &positions_dev_, &prefill_ptrs_}) {
+                         &positions_dev_, &prefill_ptrs_, &v_ids_, &v_positions_, &v_hidden_,
+                         &v_normed_, &v_qkv_, &v_attended_, &v_gate_up_, &v_gated_, &v_logits_,
+                         &v_predicted_, &v_cos_, &v_sin_}) {
     free_ptr(*pointer);
   }
   if (stream_) cudaStreamDestroy(static_cast<cudaStream_t>(stream_));
@@ -682,6 +702,169 @@ void Decoder::bench(int iterations) {
 
   cudaEventDestroy(start);
   cudaEventDestroy(stop);
+}
+
+// ---------------------------------------------------------------- speculative
+
+void Decoder::allocate_verify(int rows) {
+  if (rows <= verify_rows_) return;
+  const int hidden = config_.hidden;
+  const int q_dim = config_.heads * config_.head_dim;
+  const int kv_dim = config_.kv_heads * config_.head_dim;
+  const int qkv_rows = q_dim + 2 * kv_dim;
+  auto grow = [](void*& pointer, size_t bytes, const char* label) {
+    if (pointer) cudaFree(pointer);
+    cuda_check(cudaMalloc(&pointer, bytes), label);
+  };
+  grow(v_ids_, static_cast<size_t>(rows) * sizeof(int), "verify ids");
+  grow(v_positions_, static_cast<size_t>(rows) * sizeof(int64_t), "verify positions");
+  grow(v_hidden_, static_cast<size_t>(rows) * hidden * 2, "verify hidden");
+  grow(v_normed_, static_cast<size_t>(rows) * hidden * 2, "verify normed");
+  grow(v_qkv_, static_cast<size_t>(rows) * qkv_rows * 2, "verify qkv");
+  grow(v_attended_, static_cast<size_t>(rows) * q_dim * 2, "verify attended");
+  grow(v_gate_up_, static_cast<size_t>(rows) * 2 * config_.intermediate * 2, "verify gate_up");
+  grow(v_gated_, static_cast<size_t>(rows) * config_.intermediate * 2, "verify gated");
+  grow(v_logits_, static_cast<size_t>(rows) * config_.vocab * 2, "verify logits");
+  grow(v_predicted_, static_cast<size_t>(rows) * sizeof(int), "verify predicted");
+  grow(v_cos_, static_cast<size_t>(rows) * config_.head_dim * 2, "verify cos");
+  grow(v_sin_, static_cast<size_t>(rows) * config_.head_dim * 2, "verify sin");
+  verify_rows_ = rows;
+}
+
+void Decoder::reset(int position, int32_t token) {
+  position_ = position;
+  const int64_t position64 = position;
+  const int zero = 0;
+  cuda_check(cudaMemcpy(pos_dev_, &position64, sizeof(int64_t), cudaMemcpyHostToDevice), "verify pos");
+  cuda_check(cudaMemcpy(token_dev_, &token, sizeof(int), cudaMemcpyHostToDevice), "verify token");
+  cuda_check(cudaMemcpy(generated_dev_, &zero, sizeof(int), cudaMemcpyHostToDevice), "verify count");
+}
+
+std::vector<int32_t> Decoder::draft(int count) {
+  capture();
+  int32_t current = 0;
+  cuda_check(cudaMemcpy(&current, token_dev_, sizeof(int), cudaMemcpyDeviceToHost), "read token");
+  reset(position_, current);
+  cudaStream_t stream = static_cast<cudaStream_t>(stream_);
+  for (int i = 0; i < count; ++i) {
+    cuda_check(cudaGraphLaunch(static_cast<cudaGraphExec_t>(graph_exec_), stream), "draft launch");
+  }
+  cuda_check(cudaStreamSynchronize(stream), "draft sync");
+  std::vector<int32_t> tokens(static_cast<size_t>(count));
+  cuda_check(cudaMemcpy(tokens.data(), produced_dev_, tokens.size() * sizeof(int),
+                        cudaMemcpyDeviceToHost),
+             "draft tokens");
+  return tokens;
+}
+
+std::vector<int32_t> Decoder::produced() {
+  int generated = 0;
+  cuda_check(cudaMemcpy(&generated, generated_dev_, sizeof(int), cudaMemcpyDeviceToHost),
+             "read count");
+  std::vector<int32_t> tokens(static_cast<size_t>(generated));
+  if (generated > 0) {
+    cuda_check(cudaMemcpy(tokens.data(), produced_dev_, tokens.size() * sizeof(int),
+                          cudaMemcpyDeviceToHost),
+               "read tokens");
+  }
+  return tokens;
+}
+
+int Decoder::verify(const std::vector<int32_t>& candidates) {
+  const int count = static_cast<int>(candidates.size());
+  const int rows = count + 1;
+  grow_cache(position_ + rows + 2);
+  allocate_verify(rows);
+
+  const int hidden = config_.hidden;
+  const int head_dim = config_.head_dim;
+  const int q_dim = config_.heads * head_dim;
+  const int kv_dim = config_.kv_heads * head_dim;
+  const int qkv_rows = q_dim + 2 * kv_dim;
+  const int groups = config_.heads / config_.kv_heads;
+  cudaStream_t stream = static_cast<cudaStream_t>(stream_);
+
+  int current = 0;
+  cuda_check(cudaMemcpy(&current, token_dev_, sizeof(int), cudaMemcpyDeviceToHost), "read token");
+  std::vector<int32_t> ids(static_cast<size_t>(rows));
+  ids[0] = current;
+  for (int i = 0; i < count; ++i) ids[i + 1] = candidates[i];
+  cuda_check(cudaMemcpy(v_ids_, ids.data(), rows * sizeof(int), cudaMemcpyHostToDevice), "verify ids");
+
+  // The rotary rows for consecutive positions are adjacent in the table.
+  const size_t row_bytes = static_cast<size_t>(head_dim) * 2;
+  cuda_check(cudaMemcpyAsync(v_cos_, static_cast<const uint8_t*>(cos_table_) +
+                                         static_cast<size_t>(position_) * row_bytes,
+                             rows * row_bytes, cudaMemcpyDeviceToDevice, stream),
+             "verify cos");
+  cuda_check(cudaMemcpyAsync(v_sin_, static_cast<const uint8_t*>(sin_table_) +
+                                         static_cast<size_t>(position_) * row_bytes,
+                             rows * row_bytes, cudaMemcpyDeviceToDevice, stream),
+             "verify sin");
+
+  embed_launch(v_hidden_, embed_, v_ids_, rows, hidden, stream);
+  for (int layer = 0; layer < config_.layers; ++layer) {
+    rmsnorm_rows_launch(v_hidden_, in_norm_[layer].weight, v_normed_, rows, hidden, config_.eps, stream);
+    w4a16_gemm_launch(v_normed_, qkv_[layer].packed, qkv_[layer].scales, nullptr, v_qkv_,
+                      qkv_[layer].rows, hidden, rows, 32, stream);
+    qk_norm_rope_rows_launch(v_qkv_, qkv_rows, 0, q_norm_[layer].weight, v_cos_, v_sin_, rows,
+                             config_.heads, head_dim, config_.eps, stream);
+    qk_norm_rope_rows_launch(v_qkv_, qkv_rows, q_dim, k_norm_[layer].weight, v_cos_, v_sin_, rows,
+                             config_.kv_heads, head_dim, config_.eps, stream);
+    cache_write_rows_launch(cache_k_[layer], cache_v_[layer],
+                            static_cast<const uint8_t*>(v_qkv_) + static_cast<size_t>(q_dim) * 2,
+                            static_cast<const uint8_t*>(v_qkv_) + static_cast<size_t>(q_dim + kv_dim) * 2,
+                            position_, qkv_rows, rows, kv_dim, head_dim, capacity_, stream);
+    verify_attention_launch(v_qkv_, qkv_rows, cache_k_[layer], cache_v_[layer], pos_dev_,
+                            v_attended_, rows, config_.heads, head_dim, capacity_, groups, stream);
+    w4a16_gemm_launch(v_attended_, o_proj_[layer].packed, o_proj_[layer].scales, v_hidden_,
+                      v_hidden_, hidden, q_dim, rows, 32, stream);
+    rmsnorm_rows_launch(v_hidden_, post_norm_[layer].weight, v_normed_, rows, hidden, config_.eps,
+                        stream);
+    w4a16_gemm_launch(v_normed_, gu_[layer].packed, gu_[layer].scales, nullptr, v_gate_up_,
+                      gu_[layer].rows, hidden, rows, 32, stream);
+    silu_mul_rows_launch(v_gate_up_, v_gated_, rows, config_.intermediate, stream);
+    w4a16_gemm_launch(v_gated_, down_[layer].packed, down_[layer].scales, v_hidden_, v_hidden_,
+                      hidden, config_.intermediate, rows, 32, stream);
+  }
+  rmsnorm_rows_launch(v_hidden_, final_norm_.weight, v_normed_, rows, hidden, config_.eps, stream);
+  w4a16_gemm_launch(v_normed_, lm_head_.packed, lm_head_.scales, nullptr, v_logits_, config_.vocab,
+                    hidden, rows, 32, stream);
+  argmax_rows_launch(v_logits_, rows, config_.vocab, v_predicted_, stream);
+  cuda_check(cudaStreamSynchronize(stream), "verify sync");
+
+  std::vector<int32_t> predicted(static_cast<size_t>(rows));
+  cuda_check(cudaMemcpy(predicted.data(), v_predicted_, rows * sizeof(int), cudaMemcpyDeviceToHost),
+             "read predicted");
+
+  int matched = 0;
+  while (matched < count && predicted[matched] == candidates[matched]) ++matched;
+  std::vector<int32_t> emitted;
+  emitted.reserve(static_cast<size_t>(matched) + 1);
+  for (int i = 0; i < matched; ++i) emitted.push_back(candidates[i]);
+  emitted.push_back(predicted[matched]);
+  for (size_t i = 0; i < emitted.size(); ++i) {
+    if (emitted[i] == 151643 || emitted[i] == 151645) {
+      emitted.resize(i + 1);
+      break;
+    }
+  }
+
+  position_ += matched + 1;
+  const int64_t position64 = position_;
+  cuda_check(cudaMemcpy(pos_dev_, &position64, sizeof(int64_t), cudaMemcpyHostToDevice), "spec pos");
+  const int32_t last = emitted.back();
+  cuda_check(cudaMemcpy(token_dev_, &last, sizeof(int), cudaMemcpyHostToDevice), "spec token");
+
+  int generated = 0;
+  cuda_check(cudaMemcpy(&generated, generated_dev_, sizeof(int), cudaMemcpyDeviceToHost), "read count");
+  cuda_check(cudaMemcpy(static_cast<int*>(produced_dev_) + generated, emitted.data(),
+                        emitted.size() * sizeof(int), cudaMemcpyHostToDevice),
+             "append tokens");
+  generated += static_cast<int>(emitted.size());
+  cuda_check(cudaMemcpy(generated_dev_, &generated, sizeof(int), cudaMemcpyHostToDevice),
+             "write count");
+  return matched;
 }
 
 }  // namespace qasr

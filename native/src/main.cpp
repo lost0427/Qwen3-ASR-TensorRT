@@ -237,6 +237,20 @@ std::string Transcriber::process(const std::vector<float>& input, const char* la
                           options_.max_new_tokens);
   const double prefill_ms = prefill_timer.ms();
 
+  if (std::getenv("QASR_SPEC_CHECK")) {
+    // The target's own next tokens must all be accepted by the batched path.
+    const int prompt_length = decoder_->position();
+    const std::vector<int32_t> own = decoder_->decode(4);
+    decoder_->reset(prompt_length, own[0]);
+    const std::vector<int32_t> candidates(own.begin() + 1, own.end());
+    const int matched = decoder_->verify(candidates);
+    std::fprintf(stderr, "[spec-check] %d/%zu own tokens accepted\n", matched, candidates.size());
+    // Roll back to the prefill state so the normal path still runs.
+    decoder_->reset(prompt_length, own[0]);
+    decoder_->prefill(*prefill_, ids, embeddings_, static_cast<int>(audio_tokens), first_audio,
+                      options_.max_new_tokens);
+  }
+
   if (std::getenv("QASR_BENCH")) decoder_->bench(std::atoi(std::getenv("QASR_BENCH")));
 
   Timer decode_timer;
