@@ -9,6 +9,9 @@ void w4a16_gemv_launch(const void* x, const void* qweight, const void* scales, v
 void w4a16_gemv_launch(const void* x, const void* qweight, const void* scales,
                        const void* residual, void* y, int rows, int k, int group,
                        cudaStream_t stream);
+void w4a16_gemm_launch(const void* x, const void* qweight, const void* scales,
+                       const void* residual, void* y, int rows, int k, int m_rows, int group,
+                       cudaStream_t stream);
 void qk_norm_rope_launch(void* vectors, const void* weight, const void* cos, const void* sin,
                          int heads, int head_dim, float eps, cudaStream_t stream);
 void silu_mul_launch(const void* gate_up, void* out, int width, cudaStream_t stream);
@@ -50,6 +53,29 @@ torch::Tensor w4a16_gemv_residual(torch::Tensor x, torch::Tensor qweight, torch:
   w4a16_gemv_launch(x.contiguous().data_ptr(), qweight.data_ptr(), scales.data_ptr(),
                     residual.contiguous().data_ptr(), y.data_ptr(), rows, k, group,
                     c10::cuda::getCurrentCUDAStream().stream());
+  return y;
+}
+
+torch::Tensor w4a16_gemm(torch::Tensor x, torch::Tensor qweight, torch::Tensor scales,
+                         torch::Tensor residual) {
+  TORCH_CHECK(x.is_cuda() && qweight.is_cuda() && scales.is_cuda(), "tensors must be on CUDA");
+  TORCH_CHECK(x.scalar_type() == torch::kHalf, "x must be fp16");
+  TORCH_CHECK(x.dim() == 2, "expects activations [M, K]");
+  const int m = static_cast<int>(x.size(0));
+  const int k = static_cast<int>(x.size(1));
+  const int rows = static_cast<int>(qweight.size(0));
+  const int group = static_cast<int>(k / scales.size(1));
+  TORCH_CHECK(m >= 1 && m <= 8, "batched verification supports 1..8 rows");
+  auto x_contiguous = x.contiguous();
+  auto y = torch::empty({m, rows}, x.options());
+  const void* residual_ptr = nullptr;
+  auto residual_contiguous = residual;
+  if (residual.numel() > 0) {
+    residual_contiguous = residual.contiguous();
+    residual_ptr = residual_contiguous.data_ptr();
+  }
+  w4a16_gemm_launch(x_contiguous.data_ptr(), qweight.data_ptr(), scales.data_ptr(), residual_ptr,
+                    y.data_ptr(), rows, k, m, group, c10::cuda::getCurrentCUDAStream().stream());
   return y;
 }
 
@@ -126,6 +152,7 @@ torch::Tensor scale_w4a16(torch::Tensor weight, int64_t group) {
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("gemv", &w4a16_gemv, "W4A16 GEMV (decode step)");
   m.def("gemv_residual", &w4a16_gemv_residual, "W4A16 GEMV with residual add");
+  m.def("gemm", &w4a16_gemm, "W4A16 batched GEMM (speculative verification)");
   m.def("qk_norm_rope", &qk_norm_rope, "fused q/k RMSNorm + RoPE (in place)");
   m.def("silu_mul", &silu_mul, "fused silu(gate) * up");
   m.def("attention", &decode_attention, "single-query decode attention with device length");

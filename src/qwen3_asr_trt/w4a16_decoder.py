@@ -166,6 +166,22 @@ class _PackedLinear:
         linear.scales = scales.to(device="cuda", dtype=torch.float16).contiguous()
         return linear
 
+    def gemm(self, x: Tensor, residual: Tensor | None = None) -> Tensor:
+        """Multi-row projection: the weights are read once for M rows."""
+        if self.packed is None:
+            out = x.reshape(-1, x.shape[-1]) @ self.fp16.T
+            out = out.view(*x.shape[:-1], self.out_features)
+            return out + residual if residual is not None else out
+        flat = x.reshape(-1, x.shape[-1]).contiguous()
+        if residual is None:
+            out = extension().gemm(flat, self.packed, self.scales, flat.new_empty((0,)))
+        else:
+            out = extension().gemm(
+                flat, self.packed, self.scales,
+                residual.reshape(-1, self.out_features).contiguous(),
+            )
+        return out.view(*x.shape[:-1], self.out_features)
+
     def __call__(self, x: Tensor, residual: Tensor | None = None) -> Tensor:
         if self.packed is None:
             out = x.reshape(1, -1) @ self.fp16.T
@@ -365,6 +381,10 @@ class W4A16ASRDecoder:
         self._logits = torch.empty((1, self.vocab), dtype=torch.float16, device=cuda)
         self._attn_out = torch.empty((1, self.heads * self.head_dim), dtype=torch.float16, device=cuda)
         self._captured: torch.cuda.CUDAGraph | None = None
+        # Speculative verification: one batched step per draft width.
+        self._verify_graphs: dict[int, torch.cuda.CUDAGraph] = {}
+        self._v_ids = torch.zeros((1, 8), dtype=torch.long, device=cuda)
+        self._v_predicted = torch.zeros((1, 8), dtype=torch.long, device=cuda)
         # Same starting capacity as the native runtime (512 slots, 56 MB).
         self._allocate(max(512, max_cache))
         # Packing the projections allocates large FP32 temporaries; return them to
@@ -398,6 +418,7 @@ class W4A16ASRDecoder:
         self.capacity = capacity
         # The graph holds the buffer pointers it was captured with.
         self._captured = None
+        self._verify_graphs.clear()
 
     def ensure_capacity(self, tokens: int) -> None:
         """Grow the cache to cover ``tokens`` slots; ``max_cache`` is a floor."""
@@ -541,3 +562,111 @@ class W4A16ASRDecoder:
                 f"transcript stopped at the {self.capacity}-token KV cache after {produced} tokens"
             )
         return self._produced[:produced].tolist()
+
+    # ------------------------------------------------------- speculative use
+
+    def rewind(self, position: int, token: int) -> None:
+        """Reset the cache length and the next input token.
+
+        Cache rows at or after `position` are stale; the next step overwrites
+        them, so a rejected speculative block costs no extra copy.
+        """
+        self._pos.fill_(position)
+        self._token.fill_(token)
+
+    def _rope(self, x: Tensor, cos: Tensor, sin: Tensor) -> Tensor:
+        half = self.head_dim // 2
+        rotated = self.torch.cat((-x[..., half:], x[..., :half]), dim=-1)
+        return x * cos + rotated * sin
+
+    def _expand_kv(self, tensor: Tensor) -> Tensor:
+        return tensor[:, :, None].expand(-1, -1, self.groups, -1, -1).reshape(
+            1, self.heads, tensor.shape[2], tensor.shape[3]
+        )
+
+    def _verify_step(self, rows: int) -> None:
+        """One batched target step; every length comes from the device position."""
+        torch = self.torch
+        F = torch.nn.functional
+        offsets = torch.arange(rows, device="cuda", dtype=torch.long)
+        positions = self._pos + offsets
+        cos = self.cos_table.index_select(0, positions).unsqueeze(0).unsqueeze(0)
+        sin = self.sin_table.index_select(0, positions).unsqueeze(0).unsqueeze(0)
+
+        hidden = self.embed[self._v_ids[:, :rows]]
+        q_dim = self.heads * self.head_dim
+        k_dim = self.kv_heads * self.head_dim
+        # The mask covers the whole cache so its shape never changes: attention
+        # cost is negligible next to the weight reads.
+        total = self.capacity
+        allowed = torch.arange(total, device="cuda").unsqueeze(0) <= positions.unsqueeze(1)
+        mask = torch.zeros((1, 1, rows, total), dtype=torch.float16, device="cuda")
+        mask = mask.masked_fill(~allowed, torch.finfo(torch.float16).min)
+
+        for index in range(self.layers):
+            normed = self.in_norm[index](hidden)
+            qkv = self.qkv[index].gemm(normed)
+            q = qkv[..., :q_dim].view(1, rows, self.heads, self.head_dim).transpose(1, 2)
+            k = qkv[..., q_dim:q_dim + k_dim].view(1, rows, self.kv_heads, self.head_dim).transpose(1, 2)
+            v = qkv[..., q_dim + k_dim:].view(1, rows, self.kv_heads, self.head_dim).transpose(1, 2)
+            q = self._rope(self.q_norm[index](q), cos, sin)
+            k = self._rope(self.k_norm[index](k), cos, sin)
+            self.cache_k[index].index_copy_(2, positions, k)
+            self.cache_v[index].index_copy_(2, positions, v)
+            attended = F.scaled_dot_product_attention(
+                q, self.cache_k[index], self.cache_v[index], attn_mask=mask, enable_gqa=True
+            )
+            attended = attended.transpose(1, 2).reshape(1, rows, q_dim)
+            hidden = self.o_proj[index].gemm(attended, hidden)
+            normed = self.post_norm[index](hidden)
+            gate_up = self.gu[index].gemm(normed)
+            gated = F.silu(gate_up[..., :self.intermediate]) * gate_up[..., self.intermediate:]
+            hidden = self.down[index].gemm(gated, hidden)
+
+        logits = self.lm_head.gemm(self.final_norm(hidden))
+        self._v_predicted[:, :rows].copy_(logits.argmax(-1))
+
+    def _verify_graph(self, rows: int) -> "torch.cuda.CUDAGraph":
+        graph = self._verify_graphs.get(rows)
+        if graph is None:
+            # Warm-up writes the same cache rows the capture then overwrites, and
+            # neither run moves the position, so no state has to be restored.
+            self._verify_step(rows)
+            graph = self.torch.cuda.CUDAGraph()
+            with self.torch.cuda.graph(graph):
+                self._verify_step(rows)
+            self._verify_graphs[rows] = graph
+        return graph
+
+    def verify(self, candidates: list[int]) -> tuple[int, list[int]]:
+        """Runs the target over a draft block in one pass.
+
+        Feeds the current token plus `candidates`, so the pass predicts every
+        candidate position and the one after the block. Returns how many
+        candidates matched and the tokens to append (the accepted prefix plus
+        the target's correction, or its bonus token when everything matched).
+        """
+        torch = self.torch
+        base = int(self._pos.item())
+        count = len(candidates)
+        rows = count + 1
+        self.ensure_capacity(base + rows + 2)
+
+        self._v_ids[0, 0].copy_(self._token[0])
+        self._v_ids[0, 1:rows].copy_(
+            torch.tensor(candidates, dtype=torch.long, device="cuda")
+        )
+        self._verify_graph(rows).replay()
+        predicted = [int(value) for value in self._v_predicted[0, :rows].tolist()]
+
+        matched = 0
+        while matched < count and predicted[matched] == candidates[matched]:
+            matched += 1
+        emitted = list(candidates[:matched]) + [predicted[matched]]
+        for position, token in enumerate(emitted):
+            if token in (151643, 151645):
+                emitted = emitted[: position + 1]
+                break
+        self._pos.add_(matched + 1)
+        self._token.fill_(emitted[-1])
+        return matched, emitted

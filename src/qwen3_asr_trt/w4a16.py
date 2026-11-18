@@ -18,6 +18,7 @@ import torch
 _ROOT = Path(__file__).resolve().parents[2]
 _SOURCES = [
     _ROOT / "csrc" / "w4a16_kernel.cu",
+    _ROOT / "csrc" / "w4a16_gemm.cu",
     _ROOT / "csrc" / "decode_fusions.cu",
     _ROOT / "csrc" / "decode_attention.cu",
     _ROOT / "csrc" / "w4a16_binding.cpp",
