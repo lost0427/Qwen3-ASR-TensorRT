@@ -115,6 +115,14 @@ uv run python tools\quantize_awq.py --group 32 --utterances 128 ^
 
 The resulting checkpoint is a plain FP16 model with folded scales, so it loads with `transformers` and reproduces the base model. The INT4 packing happens when the decoder is constructed (`W4A16ASRDecoder`). Build the 0.6B prefill engine as FP16 with the output projection inside the engine: on 2,620 utterances that measured 0.089 points better WER than an INT4 prefill engine and 1.7 ms faster. Moving the projection out of the 0.6B engine leaves the prefill time unchanged at 9.4 ms and costs 4 edits.
 
+`--decoder-dir` selects the weights for `tensorrt-w4a16`: point it at a packed
+decoder checkpoint (`packed_config.json` next to `model.safetensors`) and the
+INT4 nibbles plus scales load as-is. Without the flag the CLI uses
+`artifacts/<model>/decoder-int4-g32`. A directory without `packed_config.json`
+is accepted too, but the decoder then quantizes the FP16 weights at load: that
+prints a warning, costs startup time, and on 0.6B measured 0.4 points worse WER
+than the published AWQ INT4 checkpoint.
+
 The 1.7B prefill engine with the output projection inside is 3.29 GB. On an 8 GB card that leaves too little room next to the decoder weights, TensorRT re-reads its weight pages every step, and the full-corpus prefill median is 222 ms. Leave the projection out (`build-decoder-prefill` without `--keep-lm-head`): the engine drops to 2.69 GB, prefill to 20.6 ms, and the runtime applies the INT4 `lm_head` GEMV that the decode loop already uses. On 2,620 utterances the WER is 1.9876%, identical to the engine with the projection inside, and 0.015 points better than the INT4 prefill engine.
 
 ```powershell

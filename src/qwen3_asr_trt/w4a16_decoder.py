@@ -10,6 +10,7 @@ synchronisation that made the all-TensorRT path slow.
 from __future__ import annotations
 
 import json
+import logging
 import shutil
 import sys
 from pathlib import Path
@@ -19,6 +20,8 @@ import torch.nn.functional as F
 from torch import Tensor
 
 from .w4a16 import extension
+
+logger = logging.getLogger(__name__)
 
 PACKED_FORMAT = "qwen3-asr-w4a16"
 PACKED_LAYOUT = (
@@ -278,6 +281,13 @@ class W4A16ASRDecoder:
         cuda = torch.device("cuda")
         packed = resolve_packed(str(model_id))
         descriptor = packed[0] if packed else None
+        if descriptor is None:
+            logger.warning(
+                "%s is not a packed checkpoint; quantizing FP16 weights at load. "
+                "Pass --decoder-dir with a decoder-int4-g32 directory for the published "
+                "AWQ INT4 decoder (better WER, faster startup).",
+                model_id,
+            )
         self.qkv, self.o_proj, self.gu, self.down = [], [], [], []
         self.q_norm, self.k_norm = [], []
         self.in_norm, self.post_norm = [], []

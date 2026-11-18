@@ -154,6 +154,7 @@ class TensorRTW4A16Transcriber:
         max_new_tokens: int = 256,
         max_cache: int = 512,
         group: int = 32,
+        decoder_dir: Path | None = None,
     ) -> None:
         try:
             import torch
@@ -170,8 +171,11 @@ class TensorRTW4A16Transcriber:
         self.torch = torch
         self.processor = AutoProcessor.from_pretrained(str(model_id))
         self.encoder = TensorRTAudioEncoder(Path(encoder_engine))
+        # `model_id` supplies the processor and config; the weights come from the
+        # packed decoder directory when one is given.
+        self.decoder_dir = Path(decoder_dir) if decoder_dir else Path(str(model_id))
         self.decoder = W4A16ASRDecoder(
-            str(model_id), Path(prefill_engine), max_cache=max_cache, group=group
+            str(self.decoder_dir), Path(prefill_engine), max_cache=max_cache, group=group
         )
         self.embed = self.decoder.embed
         self.audio_token_id = 151676

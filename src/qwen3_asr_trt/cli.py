@@ -74,7 +74,11 @@ def main() -> None:
     transcribe.add_argument("audio", type=Path)
     transcribe.add_argument("--language")
     transcribe.add_argument("--backend", choices=BACKENDS, default="bf16")
-    transcribe.add_argument("--decoder-dir", type=Path)
+    transcribe.add_argument(
+        "--decoder-dir",
+        type=Path,
+        help="packed decoder directory for tensorrt-w4a16 (defaults to artifacts/<model>/decoder-int4-g32) or the EXL3 directory",
+    )
     transcribe.add_argument("--decoder-engine", type=Path)
     transcribe.add_argument("--engine", type=Path)
     transcribe.add_argument("--max-cache", type=int, default=512, help=MAX_CACHE_HELP)
@@ -106,7 +110,11 @@ def main() -> None:
     benchmark.add_argument("audio", type=Path)
     benchmark.add_argument("--language", default="English")
     benchmark.add_argument("--backend", choices=BACKENDS, default="tensorrt-exllama")
-    benchmark.add_argument("--decoder-dir", type=Path)
+    benchmark.add_argument(
+        "--decoder-dir",
+        type=Path,
+        help="packed decoder directory for tensorrt-w4a16 (defaults to artifacts/<model>/decoder-int4-g32) or the EXL3 directory",
+    )
     benchmark.add_argument("--decoder-engine", type=Path)
     benchmark.add_argument("--engine", type=Path)
     benchmark.add_argument("--max-cache", type=int, default=512, help=MAX_CACHE_HELP)
@@ -119,7 +127,11 @@ def main() -> None:
     api.add_argument("--host", default="127.0.0.1")
     api.add_argument("--port", type=int, default=8000)
     api.add_argument("--backend", choices=BACKENDS, default="bf16")
-    api.add_argument("--decoder-dir", type=Path)
+    api.add_argument(
+        "--decoder-dir",
+        type=Path,
+        help="packed decoder directory for tensorrt-w4a16 (defaults to artifacts/<model>/decoder-int4-g32) or the EXL3 directory",
+    )
     api.add_argument("--decoder-engine", type=Path)
     api.add_argument("--engine", type=Path)
     api.add_argument("--max-cache", type=int, default=512, help=MAX_CACHE_HELP)
@@ -235,7 +247,11 @@ def main() -> None:
             / f"aligner-decoder-{args.aligner_preset}.{args.decoder_precision}.engine"
         )
     else:
-        args.decoder_dir = args.decoder_dir or artifact_dir / "decoder"
+        # For `tensorrt-w4a16` the weights come from a packed decoder directory;
+        # leave `--decoder-dir` unset so the backend can prefer the packed
+        # artifact over the FP16 export.
+        if args.backend != "tensorrt-w4a16":
+            args.decoder_dir = args.decoder_dir or artifact_dir / "decoder"
         args.decoder_engine = args.decoder_engine or (
             artifact_dir / "decoder-prefill" / "asr-prefill.fp16.engine"
         )
@@ -460,6 +476,13 @@ def main() -> None:
 
     if args.backend == "tensorrt-w4a16":
         load_start = time.perf_counter()
+        # Weights come from a packed decoder directory; the HF path only feeds the
+        # processor and config. Without an explicit --decoder-dir, prefer the
+        # published packed artifact over re-quantizing FP16 weights at load.
+        decoder_dir = args.decoder_dir
+        if decoder_dir is None:
+            packed = _artifact_dir(args.model) / "decoder-int4-g32"
+            decoder_dir = packed if (packed / "packed_config.json").is_file() else None
         transcriber = TensorRTW4A16Transcriber(
             args.model,
             args.decoder_engine,
@@ -467,6 +490,7 @@ def main() -> None:
             args.max_new_tokens,
             max_cache=args.max_cache,
             group=args.group,
+            decoder_dir=decoder_dir,
         )
     elif args.backend == "tensorrt-exllama":
         load_start = time.perf_counter()
