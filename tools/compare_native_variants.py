@@ -32,6 +32,8 @@ VARIANTS = {
                 ROOT / "artifacts/experiments/1.7b-depth26/prefill/asr-prefill.fp16.engine"),
     "depth26b": (ROOT / "artifacts/experiments/1.7b-depth26b/packed",
                  ROOT / "artifacts/experiments/1.7b-depth26b/prefill/asr-prefill.fp16.engine"),
+    "ffn875": (ROOT / "artifacts/experiments/1.7b-ffn875/packed",
+               ROOT / "artifacts/experiments/1.7b-ffn875/prefill/asr-prefill.fp16.engine"),
 }
 
 TIME_RE = re.compile(

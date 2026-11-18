@@ -94,6 +94,8 @@ def prompt(decoder, record) -> torch.Tensor:
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--limit", type=int, default=64)
+    parser.add_argument("--min-seconds", type=float, default=0.0,
+                        help="keep only utterances at least this long")
     parser.add_argument("--draft-tokens", type=int, default=4)
     parser.add_argument("--max-new-tokens", type=int, default=192)
     parser.add_argument("--baseline-limit", type=int, default=24)
@@ -105,7 +107,10 @@ def main() -> None:
     from windows_benchmark import normalize
 
     rows = [json.loads(line) for line in (BENCH / "data/manifest.jsonl").read_text(encoding="utf-8").splitlines()]
-    rows = [row for row in rows if (DATA / row["flac"]).is_file()][: args.limit]
+    rows = [row for row in rows if (DATA / row["flac"]).is_file()]
+    if args.min_seconds:
+        rows = [row for row in rows if row.get("durationSeconds", 0) >= args.min_seconds]
+    rows = rows[: args.limit]
 
     started = time.perf_counter()
     drafts, draft_encoder = encode_pass("0.6b", rows)
@@ -154,8 +159,11 @@ def main() -> None:
         produced = [target_first]
         accepted = proposed = rounds = 0
         started = time.perf_counter()
-        draft_graph = draft_decoder._graph()
         while len(produced) < args.max_new_tokens and produced[-1] not in EOS:
+            # The draft must cover whatever the target has produced so far, and a
+            # grown cache invalidates its captured graph.
+            draft_decoder.ensure_capacity(int(target_decoder._pos.item()) + args.draft_tokens + 2)
+            draft_graph = draft_decoder._graph()
             # Mirror the target's state without a host round-trip.
             draft_decoder._pos.copy_(target_decoder._pos)
             draft_decoder._token.copy_(target_decoder._token)

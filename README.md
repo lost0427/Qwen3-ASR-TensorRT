@@ -386,21 +386,28 @@ Each variant is packed to INT4 at group 32 and gets its own prefill engine.
 
 | Variant | Change | Packed | WER (2620) | Decode ms/token | Decode |
 | --- | --- | ---: | ---: | ---: | ---: |
-| baseline | 28 layers, FFN 6144 | 1517 MB | 1.98% | 6.93 | — |
-| ffn75 | 28 layers, FFN 4608 | 1375 MB | 3.16% | 6.04 | −12.9% |
-| depth26 | layers 11, 12 dropped | 1463 MB | 2.91% | 6.54 | −5.5% |
-| depth26b | layers 3, 25 dropped | 1463 MB | 3.35% | 6.45 | −6.9% |
+| baseline | 28 layers, FFN 6144 | 1517 MB | 1.98% | 6.99 | — |
+| ffn875 | 28 layers, FFN 5376 | 1457 MB | 2.21% | 6.57 | −5.9% |
+| ffn75 | 28 layers, FFN 4608 | 1375 MB | 3.16% | 6.11 | −12.5% |
+| depth26 | layers 11, 12 dropped | 1463 MB | 2.91% | 6.59 | −5.6% |
+| depth26b | layers 3, 25 dropped | 1463 MB | 3.35% | 6.51 | −6.8% |
 
-WER is the full 2,620-utterance corpus. Decode rates are medians of two
-interleaved native passes over 300 utterances (`tools/compare_native_variants.py`),
-so they compare to each other rather than to the table above; the two passes
-agreed to within 0.5%. `ffn75` and the two depth variants use their own engines,
-so prefill time moves with them as well.
+WER is the full 2,620-utterance corpus. Decode rates are medians of three
+interleaved native passes over 200 utterances (`tools/compare_native_variants.py`);
+the three passes agreed to within 0.3%, so the rates compare to each other but not
+to the benchmark table above.
 
-None of the three variants stays within the acceptance bound of +0.15 WER
-points. Width pruning buys the most decode for the least WER, about one decode
-point per 0.11 WER points, but it still needs recovery training; pruning without
-it is not usable at this scale.
+The exchange rate improves as the cut gets smaller, which is what the channel
+ranking predicts: the last channels removed are the least important. Twelve and a
+half percent of the FFN costs 0.23 WER points for 5.9% decode (0.039 points per
+decode point); twenty-five percent costs 1.18 points for 12.5% (0.094). Depth
+pruning costs about twice as much per decode point and buys no more.
+
+`ffn875` is 0.08 points outside the +0.15 bound. Nothing else comes close, so
+raising the bound to +0.25 would admit exactly one variant, on measured marginal
+cost rather than on convenience; whether that trade is acceptable is a product
+call, not a benchmarking one. Cutting further than 12.5% still needs recovery
+training.
 
 ### Speculative decoding
 
@@ -411,26 +418,28 @@ each warp four output rows so the block's activations are loaded once per four
 rows instead of once per row. Greedy verification is exact: 32 of 32 transcripts
 are identical to the target's own greedy decode.
 
-| | |
-| --- | --- |
-| Accepted draft tokens | 91.5% |
-| Tokens per round | 4.66 |
-| Decode, 32 utterances | 114.2 ms speculative, 126.2 ms target only (−9.5%) |
-| Decoder stage, prefill + decode | 122.7 ms, 132.7 ms (−7.5%) |
-| Full pipeline with the draft model | 154.8 ms, 132.7 ms (+16.7%) |
-| Peak GPU memory | 2.37 GiB, both decoders resident |
+| | short audio (32 utts, 5.8 s median) | long audio (12 utts, 18.5 s median) |
+| --- | ---: | ---: |
+| Accepted draft tokens | 91.5% | 95.7% |
+| Tokens per round | 4.66 | 4.83 |
+| Decode | 114.2 / 126.2 ms (−9.5%) | 319.6 / 328.0 ms (−2.6%) |
+| Decoder stage, prefill + decode | 122.7 / 132.7 ms (−7.5%) | 335.7 / 334.8 ms (+0.3%) |
+| Full pipeline with the draft model | 154.8 / 132.7 ms (+16.7%) | 406.9 / 334.8 ms (+21.5%) |
+| Transcripts identical to greedy | 32 / 32 | 12 / 12 |
+| Peak GPU memory | 2.37 GiB | 2.37 GiB |
 
 The verify reads the 1.7B weights once for the whole block, so a round costs
 about 2.6 target-steps to check and 1.9 to draft, and produces 4.66 tokens. That
 is where the 9.5% comes from, and it is bounded by the batched GEMM: at five rows
-it is 1.6x the single-row kernel instead of the ideal 1.0x.
+it is 1.6x the single-row kernel instead of the ideal 1.0x. The gain shrinks on
+longer audio because both models re-read a longer cache: a round issues nine
+queries (four draft, five verify) against the target's 4.66, so the attention
+share of the step grows with context even though acceptance improves.
 
-The draft model needs its own audio encoder and prefill, 19.4 ms per utterance,
-against the 10.5 ms the pairing saves, so the full pipeline is slower on
-LibriSpeech-length audio. The draft only amortizes after roughly 200 ms of target
-decode, about twice the median utterance; on long audio the decode gain applies
-without a bigger fixed cost.
-
-The 0.6B draft also cannot share the target's prompt embeddings, because the two
-audio towers project to different widths, so a two-model pair always pays two
-encoders.
+End to end the pairing loses, because the draft model needs its own audio encoder
+and prefill: 19.4 ms per short utterance and 36.4 ms per long one, against 10.5
+and 8.4 ms saved. The 0.6B draft cannot share the target's prompt embeddings,
+since the two audio towers project to different widths, so a two-model pair
+always pays two encoders. Making this pay would need a draft that reuses the
+target's prompt, which in practice means early exit inside the target rather than
+a second model.
