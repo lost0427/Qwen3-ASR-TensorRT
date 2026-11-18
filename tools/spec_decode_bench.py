@@ -96,6 +96,9 @@ def main() -> None:
     parser.add_argument("--limit", type=int, default=64)
     parser.add_argument("--min-seconds", type=float, default=0.0,
                         help="keep only utterances at least this long")
+    parser.add_argument("--adapter", type=Path,
+                        help="project the target's audio embeddings into the draft's space "
+                             "instead of running the small encoder")
     parser.add_argument("--draft-tokens", type=int, default=4)
     parser.add_argument("--max-new-tokens", type=int, default=192)
     parser.add_argument("--baseline-limit", type=int, default=24)
@@ -113,8 +116,20 @@ def main() -> None:
     rows = rows[: args.limit]
 
     started = time.perf_counter()
-    drafts, draft_encoder = encode_pass("0.6b", rows)
-    targets, target_encoder = encode_pass("1.7b", rows)
+    if args.adapter:
+        targets, target_encoder = encode_pass("1.7b", rows)
+        weight = torch.load(args.adapter, map_location="cpu")["weight"].float().to("cuda")
+        drafts = []
+        for record in targets:
+            audio = record["audio"].to("cuda").float()
+            drafts.append({
+                "ids": record["ids"],
+                "audio": (audio @ weight).half().cpu(),
+            })
+        draft_encoder = [0.0] * len(rows)
+    else:
+        drafts, draft_encoder = encode_pass("0.6b", rows)
+        targets, target_encoder = encode_pass("1.7b", rows)
     print(f"encoder passes: {time.perf_counter() - started:.1f} s", flush=True)
 
     draft_decoder = build_decoder("0.6b")
@@ -261,6 +276,7 @@ def main() -> None:
             + item["targetPrefillMs"] + item["specMs"]
             for index, item in enumerate(results)), 1),
         "peakGiB": round(torch.cuda.max_memory_allocated() / 2**30, 2),
+        "adapter": str(args.adapter) if args.adapter else None,
     }
     print(json.dumps(summary, indent=2))
     args.output.parent.mkdir(parents=True, exist_ok=True)

@@ -516,6 +516,35 @@ allocated. The benchmark above works only because it encodes every utterance in
 two separate passes and releases the encoders before the timed loop. A single-shot
 pipeline would have to overcommit and page.
 
+#### Sharing the encoder with a projection adapter
+
+The draft needs the 0.6B audio tower only to build its prompt embeddings, and that
+tower is what pushed the pair out of memory. `tools/fit_draft_adapter.py` fits a
+2048->1024 map from the 1.7B tower's audio embeddings to the 0.6B's, so the draft
+can build its prompt from the target's single audio pass. Both towers emit the
+same tokens for the same audio (no mismatches in 300 utterances), so the pairs
+align and the fit is a closed-form ridge solve over 50,895 positions; it explains
+83.6% of the 0.6B embedding energy.
+
+| | two encoders | adapter |
+| --- | ---: | ---: |
+| Draft acceptance | 91.5% | 89.6% |
+| Decode | 1.31x | 1.30x |
+| Audio encoders resident | 2 | 1 |
+| Full pipeline | 162.2 vs 161.6 ms (+0.4%) | 129.4 vs 147.0 ms (−12%) |
+| Transcripts identical | 32 / 32 | 32 / 32 |
+
+The adapter costs 1.9 points of acceptance and cannot change the transcript, since
+the target still verifies every token. It is the first configuration where
+speculation wins end to end, and the 147.0 ms baseline counts one encoder pass for
+both paths.
+
+It still does not fit cleanly: the target decoder, prefill engine and encoder take
+5.39 GiB of the 6.94 GiB a fresh context sees, and the draft decoder plus prefill
+take the remaining 1.55 GiB, leaving 0 MiB. Freeing one of the two large engines is
+the remaining step: an INT4 target prefill is 0.89 GiB instead of 2.57 (its WER on
+the 1.7B is unmeasured), or an INT8 encoder halves the 1.16 GiB tower.
+
 The native runtime now has the same batched verify (`Decoder::verify`, built from
 `csrc/w4a16_gemm.cu` and `csrc/verify_ops.cu`); its self-check accepts 3 of 3 of
 the target's own tokens, so the batched kernels agree with the single-token path.
