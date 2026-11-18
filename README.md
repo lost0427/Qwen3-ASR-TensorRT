@@ -406,20 +406,31 @@ it is not usable at this scale.
 
 `tools/spec_decode_bench.py` drafts four tokens with the 0.6B decoder and verifies
 them with the 1.7B decoder in a single batched pass. `W4A16ASRDecoder.verify`
-replays the whole block through a captured CUDA graph, and `csrc/w4a16_gemm.cu`
-reads each INT4 weight once for all rows of the block. Greedy verification is
-exact: 32 of 32 transcripts are identical to the target's own greedy decode.
+replays the block through a captured CUDA graph, and `csrc/w4a16_gemm.cu` gives
+each warp four output rows so the block's activations are loaded once per four
+rows instead of once per row. Greedy verification is exact: 32 of 32 transcripts
+are identical to the target's own greedy decode.
 
 | | |
 | --- | --- |
 | Accepted draft tokens | 91.5% |
 | Tokens per round | 4.66 |
-| Median, 32 utterances | 174.1 ms speculative, 154.6 ms target only |
-| Peak GPU memory | 2.37 GiB, both decoders resident with the encoders already released |
+| Decode, 32 utterances | 114.2 ms speculative, 126.2 ms target only (−9.5%) |
+| Decoder stage, prefill + decode | 122.7 ms, 132.7 ms (−7.5%) |
+| Full pipeline with the draft model | 154.8 ms, 132.7 ms (+16.7%) |
+| Peak GPU memory | 2.37 GiB, both decoders resident |
 
-On this 8 GB laptop it is 13% slower than plain decoding. The 0.6B draft costs
-0.54 target-steps per token, so a round spends 2.2 target-steps drafting and 3.1
-verifying to produce 4.66 tokens. Break-even needs the verify at 2.5 target-steps.
-A bandwidth-bound batched GEMM would reach that; the current kernel is limited by
-re-reading the five activation rows once per output feature, which measured 3-5x
-the single-row kernel instead of the ideal 1.0x.
+The verify reads the 1.7B weights once for the whole block, so a round costs
+about 2.6 target-steps to check and 1.9 to draft, and produces 4.66 tokens. That
+is where the 9.5% comes from, and it is bounded by the batched GEMM: at five rows
+it is 1.6x the single-row kernel instead of the ideal 1.0x.
+
+The draft model needs its own audio encoder and prefill, 19.4 ms per utterance,
+against the 10.5 ms the pairing saves, so the full pipeline is slower on
+LibriSpeech-length audio. The draft only amortizes after roughly 200 ms of target
+decode, about twice the median utterance; on long audio the decode gain applies
+without a bigger fixed cost.
+
+The 0.6B draft also cannot share the target's prompt embeddings, because the two
+audio towers project to different widths, so a two-model pair always pays two
+encoders.

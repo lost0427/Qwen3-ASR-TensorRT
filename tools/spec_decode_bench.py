@@ -47,7 +47,7 @@ SIZES = {
 EOS = (151643, 151645)
 
 
-def encode_pass(size: str, rows) -> tuple[list[dict], float]:
+def encode_pass(size: str, rows) -> tuple[list[dict], list[float]]:
     from transformers import AutoProcessor
 
     from qwen3_asr_trt.audio import load_audio
@@ -56,24 +56,25 @@ def encode_pass(size: str, rows) -> tuple[list[dict], float]:
     config = SIZES[size]
     processor = AutoProcessor.from_pretrained(str(config["model"]))
     encoder = TensorRTAudioEncoder(Path(config["encoder"]))
-    started = time.perf_counter()
     outputs = []
+    timings = []
     for row in rows:
+        started = time.perf_counter()
         inputs = processor.apply_transcription_request(
             audio=load_audio(DATA / row["flac"]), language="English"
         )
         features = inputs["input_features"]
         mask = torch.ones((1, features.shape[-1]), dtype=torch.int32)
         embeds = encoder.encode(features, mask).to(torch.float16)
+        timings.append((time.perf_counter() - started) * 1000)
         outputs.append({
             "ids": [int(value) for value in inputs["input_ids"][0].tolist()],
             "audio": embeds.reshape(-1, embeds.shape[-1]).cpu(),
         })
-    elapsed = (time.perf_counter() - started) * 1000 / max(1, len(rows))
     del encoder
     gc.collect()
     torch.cuda.empty_cache()
-    return outputs, elapsed
+    return outputs, timings
 
 
 def build_decoder(size: str):
@@ -107,8 +108,8 @@ def main() -> None:
     rows = [row for row in rows if (DATA / row["flac"]).is_file()][: args.limit]
 
     started = time.perf_counter()
-    drafts, draft_encoder_ms = encode_pass("0.6b", rows)
-    targets, target_encoder_ms = encode_pass("1.7b", rows)
+    drafts, draft_encoder = encode_pass("0.6b", rows)
+    targets, target_encoder = encode_pass("1.7b", rows)
     print(f"encoder passes: {time.perf_counter() - started:.1f} s", flush=True)
 
     draft_decoder = build_decoder("0.6b")
@@ -141,8 +142,12 @@ def main() -> None:
 
     results = []
     for index, (row, draft, target) in enumerate(zip(rows, drafts, targets), 1):
+        started = time.perf_counter()
         draft_decoder.prefill_prompt(prompt(draft_decoder, draft), reserve=args.max_new_tokens)
+        draft_prefill_ms = (time.perf_counter() - started) * 1000
+        started = time.perf_counter()
         target_decoder.prefill_prompt(prompt(target_decoder, target), reserve=args.max_new_tokens)
+        target_prefill_ms = (time.perf_counter() - started) * 1000
         draft_first = int(draft_decoder._token.item())
         target_first = int(target_decoder._token.item())
 
@@ -183,6 +188,8 @@ def main() -> None:
             "proposed": proposed,
             "rounds": rounds,
             "specMs": elapsed,
+            "draftPrefillMs": draft_prefill_ms,
+            "targetPrefillMs": target_prefill_ms,
             "reference": row["reference"],
         })
         if index % 10 == 0:
@@ -205,14 +212,16 @@ def main() -> None:
     # the same greedy transcript and to time the unassisted path.
     baseline = []
     for row, target in list(zip(rows, targets))[: args.baseline_limit]:
+        started = time.perf_counter()
         target_decoder.prefill_prompt(prompt(target_decoder, target), reserve=args.max_new_tokens)
+        prefill_ms = (time.perf_counter() - started) * 1000
         started = time.perf_counter()
         tokens = target_decoder.decode_loop(args.max_new_tokens)
         elapsed = (time.perf_counter() - started) * 1000
         if 151704 in tokens:
             tokens = tokens[tokens.index(151704) + 1:]
         text = tokenizer.decode(tokens, skip_special_tokens=True).strip()
-        baseline.append({"text": text, "ms": elapsed, "tokens": len(tokens)})
+        baseline.append({"text": text, "ms": elapsed, "tokens": len(tokens), "prefillMs": prefill_ms})
 
     identical = sum(1 for record, base in zip(results, baseline) if record["text"] == base["text"])
     accepted = sum(item["accepted"] for item in results)
@@ -230,8 +239,18 @@ def main() -> None:
         "baselineUtterances": len(baseline),
         "identicalTranscripts": identical,
         "corpusWER": errors / max(1, words),
-        "draftEncoderMs": round(draft_encoder_ms, 2),
-        "targetEncoderMs": round(target_encoder_ms, 2),
+        "medianDraftEncodeMs": round(statistics.median(draft_encoder), 2),
+        "medianTargetEncodeMs": round(statistics.median(target_encoder), 2),
+        "medianDraftPrefillMs": round(statistics.median(item["draftPrefillMs"] for item in results), 2),
+        "medianTargetPrefillMs": round(statistics.median(item["targetPrefillMs"] for item in results), 2),
+        "medianBaselinePipelineMs": round(statistics.median(
+            base["prefillMs"] + base["ms"] for base in baseline), 1) if baseline else None,
+        "medianSpecPipelineMs": round(statistics.median(
+            item["targetPrefillMs"] + item["specMs"] for item in results), 1),
+        "medianSpecFullMs": round(statistics.median(
+            draft_encoder[index] + target_encoder[index] + item["draftPrefillMs"]
+            + item["targetPrefillMs"] + item["specMs"]
+            for index, item in enumerate(results)), 1),
         "peakGiB": round(torch.cuda.max_memory_allocated() / 2**30, 2),
     }
     print(json.dumps(summary, indent=2))
