@@ -58,20 +58,46 @@ def load_prompts(model_dir: Path, count: int, seed: int, encoder_path: Path):
 
 def embedding_table(model, record) -> torch.Tensor:
     ids = torch.tensor([record["ids"]], dtype=torch.long, device="cuda")
-    return model.embed_tokens[ids].masked_scatter(
+    weight = getattr(model, "embed", None)
+    if weight is None:
+        weight = model.embed_tokens.weight
+    return weight[ids].masked_scatter(
         (ids == 151676).unsqueeze(-1), record["audio"].to("cuda")
     )
+
+
+def full_embeddings(model, record, tokens) -> torch.Tensor:
+    prompt = embedding_table(model, record)
+    extra = model.embed_tokens.weight[torch.tensor([tokens], dtype=torch.long, device="cuda")]
+    return torch.cat([prompt, extra], dim=1)
 
 
 def prepare(args) -> None:
     from safetensors import safe_open
     from transformers import Qwen3Config, Qwen3Model
 
+    from qwen3_asr_trt.w4a16_decoder import W4A16ASRDecoder
+
     model_dir = Path(args.model)
     raw = json.loads((model_dir / "config.json").read_text(encoding="utf-8"))
     text = dict(raw["thinker_config"]["text_config"] if "thinker_config" in raw else raw["text_config"])
-    model = Qwen3Model(Qwen3Config(**text)).eval().to("cuda", torch.float16)
     prefix = "thinker.model." if "thinker_config" in raw else "model.language_model."
+
+    _, prompts = load_prompts(model_dir, args.prompts, args.seed, Path(args.encoder))
+
+    # The transcripts come from the deployed INT4 decoder, so the student learns
+    # the distribution of the model it replaces rather than an unreleased FP16 one.
+    decoder = W4A16ASRDecoder(str(args.packed), Path(args.prefill), max_cache=1024, group=32)
+    transcripts = []
+    for index, record in enumerate(prompts, 1):
+        decoder.prefill_prompt(embedding_table(decoder, record), reserve=args.max_new_tokens)
+        transcripts.append(decoder.decode_loop(args.max_new_tokens))
+        if index % 200 == 0:
+            print(f"  transcript {index}/{len(prompts)}", flush=True)
+    del decoder
+    torch.cuda.empty_cache()
+
+    model = Qwen3Model(Qwen3Config(**text)).eval().to("cuda", torch.float16)
     state = {}
     with safe_open(str(model_dir / "model.safetensors"), "pt", "cpu") as handle:
         for key in handle.keys():
@@ -80,15 +106,22 @@ def prepare(args) -> None:
     model.load_state_dict(state, strict=False)
     del state
 
-    _, prompts = load_prompts(model_dir, args.prompts, args.seed, Path(args.encoder))
     head = model.embed_tokens.weight
     cache = []
     with torch.no_grad():
-        for index, record in enumerate(prompts, 1):
-            hidden = model(inputs_embeds=embedding_table(model, record)).last_hidden_state
+        for index, (record, tokens) in enumerate(zip(prompts, transcripts), 1):
+            full = full_embeddings(model, record, tokens)
+            hidden = model(inputs_embeds=full).last_hidden_state
             logits = model.norm(hidden).float() @ head.float().t()
-            values, indices = logits.topk(args.topk, dim=-1)
-            cache.append((values.half().cpu(), indices.to(torch.int32).cpu()))
+            start = len(record["ids"]) - 1
+            picked = logits[:, start:start + len(tokens)]
+            values, indices = picked.topk(args.topk, dim=-1)
+            cache.append({
+                "prompt": record["ids"],
+                "tokens": tokens,
+                "values": values.half().cpu(),
+                "indices": indices.to(torch.int32).cpu(),
+            })
             if index % 200 == 0:
                 print(f"  teacher {index}/{len(prompts)}", flush=True)
     CACHE.parent.mkdir(parents=True, exist_ok=True)
@@ -150,11 +183,12 @@ def train(args) -> None:
     cache = torch.load(CACHE, map_location="cpu")
     if len(cache) != len(prompts):
         raise SystemExit("teacher cache and prompt list disagree; re-run --stage prepare")
-    print(f"{len(prompts)} prompts, {sum(p.numel() for a in adapters for p in a.parameters())} adapter parameters",
-          flush=True)
+    print(f"{len(prompts)} prompts, "
+          f"{sum(p.numel() for p in (a.a for a in adapters)) + sum(p.numel() for p in (a.b for a in adapters))} "
+          f"adapter parameters", flush=True)
 
     head = model.embed_tokens.weight
-    parameters = [p for adapter in adapters for p in adapter.parameters()]
+    parameters = [p for adapter in adapters for p in (adapter.a, adapter.b)]
     optimizer = torch.optim.AdamW(parameters, lr=args.lr, weight_decay=0.0)
     order = list(range(len(prompts)))
 
@@ -162,16 +196,22 @@ def train(args) -> None:
         total = 0.0
         for step, index in enumerate(order, 1):
             record = prompts[index]
-            values, indices = cache[index]
-            target = torch.softmax(values.float().to("cuda"), dim=-1)
-            hidden = model(inputs_embeds=embedding_table(model, record)).last_hidden_state
+            entry = cache[index]
+            tokens = entry["tokens"]
+            target = torch.softmax(entry["values"].float().to("cuda"), dim=-1)
+            full = full_embeddings(model, record, tokens)
+            hidden = model(inputs_embeds=full).last_hidden_state
             logits = model.norm(hidden).float() @ head.float().t()
-            picked = logits.gather(-1, indices.to("cuda").long())
+            start = len(record["ids"]) - 1
+            picked = logits[:, start:start + len(tokens)].gather(
+                -1, entry["indices"].to("cuda").long()
+            )
             loss = -(target * torch.log_softmax(picked, dim=-1)).sum(-1).mean()
             loss.backward()
+            torch.nn.utils.clip_grad_norm_(parameters, 1.0)
             optimizer.step()
             optimizer.zero_grad(set_to_none=True)
-            total += float(loss)
+            total += float(loss.detach())
             if step % 200 == 0:
                 print(f"  epoch {epoch + 1} {step}/{len(order)} loss {total / step:.4f}", flush=True)
         print(f"epoch {epoch + 1} mean loss {total / len(order):.4f}", flush=True)
@@ -183,6 +223,12 @@ def train(args) -> None:
             tensors[key] = adapter.merged().cpu()
     output.mkdir(parents=True, exist_ok=True)
     save_file(tensors, str(output / "model.safetensors"))
+    if output.resolve() != pruned_dir.resolve():
+        import shutil
+
+        for candidate in pruned_dir.iterdir():
+            if candidate.is_file() and candidate.name != "model.safetensors":
+                shutil.copy2(candidate, output / candidate.name)
     print(f"wrote {output} ({(output / 'model.safetensors').stat().st_size / 2**30:.2f} GiB)", flush=True)
 
 
@@ -198,6 +244,10 @@ def main() -> None:
     parser.add_argument("--rank", type=int, default=16)
     parser.add_argument("--alpha", type=float, default=32.0)
     parser.add_argument("--lr", type=float, default=1e-3)
+    parser.add_argument("--max-new-tokens", type=int, default=64)
+    parser.add_argument("--packed", default="artifacts/qwen3-asr-1.7b/decoder-int4-g32",
+                        help="packed teacher decoder used to generate transcripts")
+    parser.add_argument("--prefill", default="artifacts/qwen3-asr-1.7b/decoder-prefill-2048/asr-prefill.fp16.engine")
     parser.add_argument("--seed", type=int, default=1337)
     parser.add_argument("--encoder", default="artifacts/qwen3-asr-1.7b/encoder-window-win.bf16.engine")
     args = parser.parse_args()

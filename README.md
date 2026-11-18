@@ -406,8 +406,47 @@ pruning costs about twice as much per decode point and buys no more.
 `ffn875` is 0.08 points outside the +0.15 bound. Nothing else comes close, so
 raising the bound to +0.25 would admit exactly one variant, on measured marginal
 cost rather than on convenience; whether that trade is acceptable is a product
-call, not a benchmarking one. Cutting further than 12.5% still needs recovery
-training.
+call, not a benchmarking one.
+
+### Recovery
+
+Three options were measured; all keep the tensor shapes, so the packed decoder
+and the prefill engine come out of the same pipeline.
+
+`tools/refit_pruned_ffn.py` re-solves each pruned FFN's output projection in
+closed form so the layer reproduces the unpruned layer's output on train-clean-100
+activations (256 audio prompts, ridge 1e-3):
+
+| Variant | WER (2620) | vs unpruned | Decode |
+| --- | ---: | ---: | ---: |
+| ffn75 | 3.16% | +1.18 | −12.5% |
+| ffn75 + refit | 2.78% | +0.80 | −12.5% |
+| ffn875 | 2.21% | +0.23 | −5.9% |
+| ffn875 + refit | 2.19% | +0.21 | −5.9% |
+
+The refit recovers a third of the loss at a 25% cut and almost nothing at 12.5%.
+At 12.5% the dropped channels carry so little of the layer's output that the
+truncated sum is already near the least-squares optimum, so there is nothing to
+re-solve; at 25% the error is systematic enough for the refit to help.
+
+Self-distillation (`tools/distill_pruned.py`) did not work and is recorded as a
+negative result. The student is the pruned FP16 decoder with rank-16 adapters on
+its FFN projections; the teacher is the unpruned model's top-32 next-token
+distribution on train-clean-100 prompts. The first attempt distilled every prompt
+position and failed loudly: three quarters of those positions are audio
+placeholders whose next token is arbitrary, so the loss was dominated by noise,
+the adapters moved 18% of the weight, and WER collapsed to 92%. Restricting the
+loss to the positions that predict the model's own transcript fixed the objective
+(starting loss fell from 1.88 to 0.20 nats) but not the outcome: the adapters
+still moved 3-14% of each projection and WER rose from 2.19% to 3.78%.
+
+The lesson is that this model pair has almost no headroom on the next-token
+distribution: the pruned model already reproduces the teacher on the tokens that
+matter, so the remaining WER gap comes from compounding errors over a 30-token
+transcript, which token-level distillation with a low-rank adapter does not
+address. A production attempt would need the student to train on its own
+trajectories (on-policy), or much larger data, and would still have to beat the
+closed-form refit before it is worth the compute.
 
 ### Speculative decoding
 
