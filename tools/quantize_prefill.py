@@ -167,6 +167,7 @@ def main() -> None:
         # turns into 0 and TensorRT rejects. Restrict to MatMul: the weights are
         # where the bytes are, and everything else stays float32.
         op_types_to_quantize=["MatMul"],
+        use_external_data_format=True,
     )
 
     # TensorRT only accepts a quantized constant that feeds a DequantizeLinear, and
