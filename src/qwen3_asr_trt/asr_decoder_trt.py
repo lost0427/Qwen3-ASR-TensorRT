@@ -191,7 +191,12 @@ def build_asr_decoder_engine(
     profiles: dict[str, tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...]]],
     workspace_gib: int = 2,
 ) -> None:
-    """Build a TensorRT engine for one of the exported graphs."""
+    """Build a TensorRT engine for one of the exported graphs.
+
+    A graph that carries explicit QuantizeLinear/DequantizeLinear nodes runs on
+    INT8 kernels when the builder can match that pattern; TensorRT 11 always
+    allows INT8, so no builder flag is involved.
+    """
     import tensorrt as trt
 
     logger = trt.Logger(trt.Logger.WARNING)

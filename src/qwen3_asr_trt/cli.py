@@ -145,7 +145,7 @@ def main() -> None:
 
     build_decoder = commands.add_parser("build-decoder-prefill")
     build_decoder.add_argument("--output-dir", type=Path)
-    build_decoder.add_argument("--precision", choices=("fp16", "bf16"), default="fp16")
+    build_decoder.add_argument("--precision", choices=("fp16", "bf16", "int8"), default="fp16")
     build_decoder.add_argument("--max-seq", type=int, default=512)
     build_decoder.add_argument("--opt-seq", type=int, default=256)
     build_decoder.add_argument("--workspace-gib", type=int, default=1)
@@ -441,6 +441,10 @@ def main() -> None:
         started = time.perf_counter()
         onnx_path = args.onnx
         if onnx_path is None:
+            if args.precision == "int8":
+                raise SystemExit(
+                    "--precision int8 builds from a quantized ONNX; pass --onnx "
+                    "(see tools/quantize_prefill.py)")
             export_asr_decoder(
                 args.model,
                 args.output_dir,

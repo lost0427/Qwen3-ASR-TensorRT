@@ -57,21 +57,22 @@ def encode_pass(size: str, rows) -> tuple[list[dict], list[dict]]:
     from transformers import AutoProcessor
 
     from qwen3_asr_trt.audio import load_audio
-    from qwen3_asr_trt.tensorrt_encoder import TensorRTAudioEncoder
+    from qwen3_asr_trt.features import GpuLogMel, PromptTemplate
+    from qwen3_asr_trt.tensorrt_encoder import TensorRTAudioEncoder, _post_cnn_tokens
 
     config = SIZES[size]
     processor = AutoProcessor.from_pretrained(str(config["model"]))
     encoder = TensorRTAudioEncoder(Path(config["encoder"]))
+    mel = GpuLogMel(processor.feature_extractor)
+    template = PromptTemplate(processor, "English")
     outputs = []
     timings = []
     for row in rows:
         started = time.perf_counter()
-        inputs = processor.apply_transcription_request(
-            audio=load_audio(DATA / row["flac"]), language="English"
-        )
+        features, mask, valid_frames = mel(load_audio(DATA / row["flac"]))
+        ids = template(_post_cnn_tokens(valid_frames))
+        torch.cuda.synchronize()
         preprocess_ms = (time.perf_counter() - started) * 1000
-        features = inputs["input_features"]
-        mask = torch.ones((1, features.shape[-1]), dtype=torch.int32)
         torch.cuda.synchronize()
         encoding = time.perf_counter()
         embeds = encoder.encode(features, mask).to(torch.float16)
@@ -79,7 +80,7 @@ def encode_pass(size: str, rows) -> tuple[list[dict], list[dict]]:
         encode_ms = (time.perf_counter() - encoding) * 1000
         timings.append({"preprocess": preprocess_ms, "encode": encode_ms})
         outputs.append({
-            "ids": [int(value) for value in inputs["input_ids"][0].tolist()],
+            "ids": [int(value) for value in ids[0].tolist()],
             "audio": embeds.reshape(-1, embeds.shape[-1]).cpu(),
         })
     del encoder
@@ -188,8 +189,7 @@ def main() -> None:
             row_values = current
         return row_values[-1], len(left)
 
-    results = []
-    for index, (row, draft, target) in enumerate(zip(rows, drafts, targets), 1):
+    def spec_pass(draft, target):
         started = time.perf_counter()
         draft_decoder.prefill_prompt(prompt(draft_decoder, draft), reserve=args.max_new_tokens)
         torch.cuda.synchronize()
@@ -236,7 +236,7 @@ def main() -> None:
             draft_decoder._token.copy_(target_decoder._token)
         torch.cuda.synchronize()
         elapsed = (time.perf_counter() - started) * 1000
-        results.append({
+        return {
             "tokens": produced,
             "firstMatches": int(draft_first == target_first),
             "accepted": accepted,
@@ -245,28 +245,9 @@ def main() -> None:
             "specMs": elapsed,
             "draftPrefillMs": draft_prefill_ms,
             "targetPrefillMs": target_prefill_ms,
-            "reference": row["reference"],
-        })
-        if index % 10 == 0:
-            print(f"  {index}/{len(rows)}", flush=True)
+        }
 
-    from transformers import AutoProcessor
-
-    tokenizer = AutoProcessor.from_pretrained(str(SIZES["1.7b"]["model"])).tokenizer
-    for record in results:
-        tokens = record["tokens"]
-        if 151704 in tokens:
-            tokens = tokens[tokens.index(151704) + 1:]
-        record["text"] = tokenizer.decode(tokens, skip_special_tokens=True).strip()
-        errors, words = edit_distance(normalize(record["reference"]), normalize(record["text"]))
-        record["errors"] = errors
-        record["words"] = words
-        del record["tokens"]
-
-    # Baseline: the target alone on the same prompts, to confirm the output is
-    # the same greedy transcript and to time the unassisted path.
-    baseline = []
-    for row, target in list(zip(rows, targets))[: args.baseline_limit]:
+    def plain_pass(target):
         started = time.perf_counter()
         target_decoder.prefill_prompt(prompt(target_decoder, target), reserve=args.max_new_tokens)
         torch.cuda.synchronize()
@@ -274,12 +255,50 @@ def main() -> None:
         started = time.perf_counter()
         tokens = target_decoder.decode_loop(args.max_new_tokens)
         torch.cuda.synchronize()
-        elapsed = (time.perf_counter() - started) * 1000
+        return {"tokens": tokens, "ms": (time.perf_counter() - started) * 1000,
+                "prefillMs": prefill_ms}
+
+    results = []
+    baselines = []
+    for index, (row, draft, target) in enumerate(zip(rows, drafts, targets)):
+        record = {"reference": row["reference"]}
+        # Alternate the order so neither path is always the one running on the
+        # colder (or hotter) card.
+        order = ("spec", "plain") if index % 2 else ("plain", "spec")
+        baseline = None
+        for stage in order:
+            if stage == "plain":
+                if index >= args.baseline_limit:
+                    continue
+                baseline = plain_pass(target)
+            else:
+                record.update(spec_pass(draft, target))
+        results.append(record)
+        if baseline is not None:
+            baselines.append(baseline)
+            record["baselineMs"] = baseline["ms"]
+        if (index + 1) % 10 == 0:
+            print(f"  {index + 1}/{len(rows)}", flush=True)
+
+    from transformers import AutoProcessor
+
+    tokenizer = AutoProcessor.from_pretrained(str(SIZES["1.7b"]["model"])).tokenizer
+
+    def strip(tokens):
         if 151704 in tokens:
             tokens = tokens[tokens.index(151704) + 1:]
-        text = tokenizer.decode(tokens, skip_special_tokens=True).strip()
-        baseline.append({"text": text, "ms": elapsed, "tokens": len(tokens), "prefillMs": prefill_ms})
+        return tokenizer.decode(tokens, skip_special_tokens=True).strip()
 
+    for record, base in zip(results, baselines):
+        record["text"] = strip(record["tokens"])
+        errors, words = edit_distance(normalize(record["reference"]), normalize(record["text"]))
+        record["errors"] = errors
+        record["words"] = words
+        del record["tokens"]
+        base["text"] = strip(base["tokens"])
+        base["tokens"] = len(base["tokens"]) - 1
+
+    baseline = baselines
     identical = sum(1 for record, base in zip(results, baseline) if record["text"] == base["text"])
     accepted = sum(item["accepted"] for item in results)
     proposed = sum(item["proposed"] for item in results)
