@@ -531,6 +531,29 @@ Running the two prefills concurrently on separate streams is also a negative
 result: 34.4 ms wall against 29.5 ms serial. Both passes are bandwidth-bound, so
 they queue behind one another and only pick up interference.
 
+**Tensor cores do not help the verification pass at M = 4.** Three versions were
+built and measured. The first dequantised the block's 64 weight rows of one
+quantisation group into shared memory and ran `mma.m16n8k16` with fp32
+accumulation; the second widened that tile to four groups to cut the barriers; the
+third dropped shared memory entirely and unpacked the two nibble pairs directly
+into each B fragment. Correctness was fine (max difference 0.002 against the SIMT
+kernel, from the fp32 accumulation order), but every version lost:
+
+| shape (m = 5) | SIMT | mma, shared | mma, 4 groups | mma, fragments |
+| --- | ---: | ---: | ---: | ---: |
+| lm_head 151936x2048 | 0.947 | 1.094 | 1.037 | 1.092 |
+| gu 12288x2048 | 0.085 | 0.089 | 0.088 | 0.091 |
+| down 2048x6144 | 0.048 | 0.078 | 0.081 | 0.075 |
+
+The reason is the shape: a 16x8 tile wastes eleven of its sixteen rows when only
+five tokens are being verified, and the kernel is limited by weight bytes and
+fragment-load instructions rather than by multiply-add throughput. The SIMT
+kernel already runs at 133-160 GB/s at M = 5 against 159-244 GB/s at M = 1; that
+gap is the per-row instruction cost, and a tensor-core tile does not remove it
+because every 16-value step still needs fresh fragments. Squeezing the verify
+further needs more rows per weight read, i.e. verifying several utterances in one
+pass, not a different arithmetic unit.
+
 Replacing the INT8 draft prefill with the fp16 one is a wash. The fp16 engine
 takes the stage from 12.4 to 9.9 ms and its better numerics raise acceptance from
 86.8% to 91.2%, but it needs 1,142 MB instead of 428 MB, and the resident set then
