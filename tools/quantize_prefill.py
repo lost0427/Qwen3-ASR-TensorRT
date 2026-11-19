@@ -99,6 +99,9 @@ def main() -> None:
     parser.add_argument("--seed", type=int, default=1337)
     parser.add_argument("--audio-token", type=int, default=151676)
     parser.add_argument("--skip-export", action="store_true")
+    parser.add_argument("--keep-attention-fp32", action="store_true", default=True,
+                        help="leave the activation-only attention matmuls in float32")
+    parser.add_argument("--quantize-attention", dest="keep_attention_fp32", action="store_false")
     args = parser.parse_args()
 
     from onnxruntime.quantization import CalibrationMethod, QuantFormat, QuantType, quantize_static
@@ -125,6 +128,18 @@ def main() -> None:
     graph = onnx.load(str(fp32_onnx))
     input_names = [value.name for value in graph.graph.input]
     print("inputs", input_names, flush=True)
+
+    # The prefilled block runs full-sequence attention, whose two matmuls are
+    # activation-only: quantizing them saves no bytes and wrecks the softmax
+    # inputs, so they stay float32 by default.
+    exclude: list[str] = []
+    if args.keep_attention_fp32:
+        for node in graph.graph.node:
+            if node.op_type != "MatMul":
+                continue
+            if "scaled_dot_product_attention" in node.name or node.name.startswith("node_MatMul"):
+                exclude.append(node.name)
+        print(f"excluding {len(exclude)} attention matmuls", flush=True)
 
     # TensorRT rejects the Q/DQ patterns that ORT emits without shape inference and
     # a symbolic-shape pass, so run the documented pre-processing first.
@@ -167,6 +182,7 @@ def main() -> None:
         # turns into 0 and TensorRT rejects. Restrict to MatMul: the weights are
         # where the bytes are, and everything else stays float32.
         op_types_to_quantize=["MatMul"],
+        nodes_to_exclude=exclude,
         use_external_data_format=True,
     )
 
