@@ -42,6 +42,21 @@ def main() -> None:
     ext = extension()
     torch.manual_seed(0)
     empty = torch.empty(0, device="cuda", dtype=torch.float16)
+
+    # The card idles at ~200 MHz and only boosts under sustained load, so the first
+    # shape measured would otherwise look 2-3x slower than the rest.
+    warm_weight = torch.randn(151936, 2048, device="cuda", dtype=torch.float16) * 0.02
+    warm_packed = ext.pack(warm_weight, 32)
+    warm_scales = ext.scale(warm_weight, 32)
+    warm_x = torch.randn(5, 2048, device="cuda", dtype=torch.float16)
+    deadline = time.perf_counter() + 3.0
+    while time.perf_counter() < deadline:
+        for _ in range(20):
+            ext.gemm(warm_x, warm_packed, warm_scales, empty)
+        torch.cuda.synchronize()
+    del warm_weight, warm_packed, warm_scales
+    torch.cuda.empty_cache()
+
     print(f"{'shape':>8} {'rows':>7} {'k':>5} {'m1 ms':>7} {'m5 ms':>7} {'ratio':>6} "
           f"{'m5 GB/s':>8} {'max|diff|':>9}")
     for name, rows, k in SHAPES:
