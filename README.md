@@ -457,49 +457,68 @@ remaining 0.06 points to the acceptance bound is unknown and was not attempted.
 
 ### Speculative decoding
 
-`tools/spec_decode_bench.py` drafts four tokens with the 0.6B decoder and verifies
+`tools/spec_decode_bench.py` drafts three tokens with the 0.6B decoder and verifies
 them with the 1.7B decoder in a single batched pass. `W4A16ASRDecoder.verify`
 replays the block through a captured CUDA graph, and `csrc/w4a16_gemm.cu` gives
 each warp four output rows so the block's activations are loaded once per four
 rows instead of once per row. Greedy verification is exact: 32 of 32 transcripts
 are identical to the target's own greedy decode.
 
-| | short audio (32 utts, 5.8 s median) | long audio (12 utts, 18.5 s median) |
+Every stage in that benchmark is synchronised to the host and the card is warmed
+to its boost clock before timing. Without the synchronise a prefill is recorded as
+its enqueue time and the decode loop absorbs the rest, which is how an earlier
+version of this section reported a prefill of 8.3 ms for a pass that takes 17-20.
+
+| | short audio, 32 utts, 32 baseline |
+| --- | ---: |
+| Accepted draft tokens | 86.8% |
+| Tokens per round | 3.60 |
+| Decode | 95.3 / 116.2 ms (1.22x) |
+| Decoder stage, prefill + decode | 129.8 / 133.3 ms (−2.6%) |
+| Full pipeline | 142.1 / 146.6 ms (−3.1%) |
+| Transcripts identical to greedy | 32 / 32 |
+| Peak GPU memory | 2.39 GiB |
+
+A round costs 3 draft steps and one four-row verify, 13-14 ms in total, and
+produces 3.60 tokens: the draft spends 2.1 ms per token against the target's 5.1,
+and the batched verify 7.3 ms against 5.1 for a single-row step. The batched GEMM
+runs at 121 GB/s against the single-row kernel's 181, because every output row
+re-reads the block's activations.
+
+The median stage budget of the speculative path:
+
+| stage | ms | share |
 | --- | ---: | ---: |
-| Accepted draft tokens | 91.5% | 95.7% |
-| Tokens per round | 4.66 | 4.83 |
-| Decode | 115.9 / 152.4 ms (1.31x) | 319.6 / 328.0 ms (1.03x) |
-| Decoder stage, prefill + decode | 126.8 / 161.5 ms (−21.5%) | 335.7 / 334.8 ms (+0.3%) |
-| Full pipeline with the draft model | 162.2 / 161.6 ms (+0.4%) | 406.9 / 334.8 ms (+21.5%) |
-| Transcripts identical to greedy | 32 / 32 | 12 / 12 |
-| Peak GPU memory | 2.35 GiB | 2.37 GiB |
+| log-mel (GPU) + prompt | 4.4 | 3% |
+| 1.7B audio encoder | 9.2 | 6% |
+| 1.7B prefill | 17.1 | 12% |
+| 0.6B prefill (INT8 engine) | 12.5 | 9% |
+| speculative decode | 95.3 | 67% |
 
-A round costs about 1.6 target-steps to verify and 1.9 to draft, and produces 4.66
-tokens; the draft spends 2.39 ms per token against the target's 5.10, and the
-verify 8.31 ms against 5.10. Three things make the verify cost more than the
-single-row step it replaces: the batched GEMM runs at 1.5–1.7x the single-row
-rate because it re-reads the block's activations once per output row, the layer
-still needs about fifteen small kernel launches, and attention scans the live
-length even though the kernel takes it from the device position.
+The 0.6B prefill is what caps the end-to-end return. Its INT8 engine keeps the
+weights in int8 (428 MB against 1,142 MB for an fp16 build that does not fit), but
+TensorRT dequantizes them on every execution: from one prompt token to 105 tokens
+the pass still takes 6.4-7.7 ms, so a fixed weight-dequantization pass dominates
+it and the model runs at about 52 GB/s. Two attempts to change that are recorded
+as negative results. Collapsing the per-output-channel weight scales to per-tensor
+(`tools/collapse_weight_scales.py`) moves the time by 3-8%, so the Q/DQ pattern is
+not being turned into an INT8 matmul either way. Building with `--opt-seq 128` for
+the short prompts changes nothing measurable; `--opt-seq 512` is slightly better
+across 64-512 tokens.
 
-Sweeping the draft length in one process, so clock drift hits every K equally,
-puts the optimum at four:
+Running the two prefills concurrently on separate streams is also a negative
+result: 34.4 ms wall against 29.5 ms serial. Both passes are bandwidth-bound, so
+they queue behind one another and only pick up interference.
 
-| K | 1 | 2 | 3 | 4 | 5 | 6 | 7 |
-| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| Speedup | 1.00x | 1.00x | 1.18x | **1.28x** | 1.05x | 1.14x | 0.96x |
+The draft length was swept with the same benchmark. Three wins at the current
+acceptance rate, because a draft step costs 2.1 ms and the fourth candidate is the
+one most likely to be rejected:
 
-Past four the batch grows to six or more rows, the GEMM loses more to register
-pressure than the extra candidates return, and acceptance per proposed token falls
-from 0.91 to 0.63.
-
-End to end the pairing only breaks even on short audio: the draft model needs its
-own audio encoder and prefill, 22.8 ms per utterance, against the 35.7 ms the
-pairing saves. The 0.6B draft cannot share the target's prompt embeddings, since
-the two audio towers project to different widths, so a two-model pair always pays
-two encoders. On long audio the gain shrinks as well, because a round issues nine
-queries (four draft, five verify) against the target's 4.66, so the attention
-share of the step grows with context even though acceptance improves.
+| K | 3 | 4 | 5 |
+| --- | ---: | ---: | ---: |
+| Decode speedup, 12 utts | **1.21x** | 1.15x | 1.15x |
+| Decode speedup, 32 utts | **1.22x** | 1.17x | — |
+| Acceptance | 86.8% | 80.2% | 79.7% |
 
 Two follow-ups were measured and are recorded as negative results. **Self
 speculation** (drafting with the target's first N layers, which would share the
@@ -529,30 +548,18 @@ align and the fit is a closed-form ridge solve over 50,895 positions; it explain
 | | two encoders | adapter |
 | --- | ---: | ---: |
 | Draft acceptance | 91.5% | 89.6% |
-| Decode | 1.31x | 1.30x |
 | Audio encoders resident | 2 | 1 |
-| Full pipeline | 162.2 vs 161.6 ms (+0.4%) | 129.4 vs 147.0 ms (−12%) |
-| Transcripts identical | 32 / 32 | 32 / 32 |
+| Full pipeline, synchronised timing | not measured | −3.1% |
 
 The adapter costs 1.9 points of acceptance and cannot change the transcript, since
-the target still verifies every token. It is the first configuration where
-speculation wins end to end, and the 147.0 ms baseline counts one encoder pass for
-both paths.
+the target still verifies every token.
 
-It still does not fit cleanly: the target decoder, prefill engine and encoder take
-5.39 GiB of the 6.94 GiB a fresh context sees, and the draft decoder plus prefill
-take the remaining 1.55 GiB, leaving 0 MiB. Three ways to free the ~0.4 GiB were
-checked. An INT4 prefill for the target would save 1.7 GiB, but this repo has no
-supported path for quantizing the decoder prefill ONNX (only the encoder has
-`quantize-encoder`). The INT8 encoder is 311 MB instead of 610, but the calibrated
-width-pinned engine is limited to an 800-frame profile and rebuilding it for the
-full 3,600 frames failed in the builder, so it saves 0.28 GiB at best. The pruned
-`ffn875-refit` target saves 0.32 GiB and leaves 12 MiB free, which is the same
-place: the card is fully committed.
-
-So the adapter configuration needs roughly 0.4 GiB that this build cannot find; on
-a 12 GB card it runs as measured, and on 8 GB it needs either a quantized decoder
-prefill or the pruned target.
+With the draft prefill quantized to INT8 the pair fits: the target decoder and KV
+cache take 1.60 GiB, its prefill engine 2.69 GiB, its encoder 0.61 GiB, the draft
+decoder 0.61 GiB and its INT8 prefill 0.43 GiB, leaving 0.57-0.68 GiB free. That
+configuration measures 86.8% acceptance with a three-token draft, because the int8
+activations of the draft prefill shift which candidates it proposes; the target
+still verifies every one, so the transcripts stay identical.
 
 The native runtime now has the same batched verify (`Decoder::verify`, built from
 `csrc/w4a16_gemm.cu` and `csrc/verify_ops.cu`); its self-check accepts 3 of 3 of

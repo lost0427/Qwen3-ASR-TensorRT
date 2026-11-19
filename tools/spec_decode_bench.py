@@ -48,6 +48,24 @@ SIZES = {
 EOS = (151643, 151645)
 
 
+def _clock_line(label: str) -> None:
+    """Logs the SM clock: this laptop idles at 210 MHz and throttles near 83 C."""
+    import shutil
+    import subprocess
+
+    if shutil.which("nvidia-smi") is None:
+        return
+    try:
+        out = subprocess.run(
+            ["nvidia-smi", "--query-gpu=clocks.sm,clocks.mem,temperature.gpu,power.draw",
+             "--format=csv,noheader"],
+            capture_output=True, text=True, timeout=10,
+        )
+        print(f"clocks {label}: {out.stdout.strip()}", flush=True)
+    except (OSError, subprocess.SubprocessError):
+        pass
+
+
 def encode_pass(size: str, rows) -> tuple[list[dict], list[dict]]:
     """Feature extraction and the audio encoder, timed separately.
 
@@ -116,7 +134,7 @@ def main() -> None:
     parser.add_argument("--adapter", type=Path,
                         help="project the target's audio embeddings into the draft's space "
                              "instead of running the small encoder")
-    parser.add_argument("--draft-tokens", type=int, default=4)
+    parser.add_argument("--draft-tokens", type=int, default=3)
     parser.add_argument("--max-new-tokens", type=int, default=192)
     parser.add_argument("--baseline-limit", type=int, default=24)
     parser.add_argument("--output", type=Path, default=ROOT / "artifacts/experiments/spec-decode.json")
@@ -164,6 +182,7 @@ def main() -> None:
         torch.cuda.synchronize()
     del warm, probe
     torch.cuda.empty_cache()
+    _clock_line("after warm-up")
 
     # Self-check: the target's own next tokens must all be accepted by `verify`.
     target_decoder.prefill_prompt(prompt(target_decoder, targets[0]), reserve=64)
@@ -198,6 +217,7 @@ def main() -> None:
         target_decoder.prefill_prompt(prompt(target_decoder, target), reserve=args.max_new_tokens)
         torch.cuda.synchronize()
         target_prefill_ms = (time.perf_counter() - started) * 1000
+        prefill_ms = draft_prefill_ms + target_prefill_ms
         draft_first = int(draft_decoder._token.item())
         target_first = int(target_decoder._token.item())
 
@@ -243,6 +263,7 @@ def main() -> None:
             "proposed": proposed,
             "rounds": rounds,
             "specMs": elapsed,
+            "prefillMs": prefill_ms,
             "draftPrefillMs": draft_prefill_ms,
             "targetPrefillMs": target_prefill_ms,
         }
@@ -323,26 +344,33 @@ def main() -> None:
             item["preprocess"] for item in draft_encoder), 2),
         "medianTargetPreprocessMs": round(statistics.median(
             item["preprocess"] for item in target_encoder), 2),
+        "medianBaselinePrefillMs": round(statistics.median(
+            base["prefillMs"] for base in baseline), 2) if baseline else None,
+        "medianSpecPrefillMs": round(statistics.median(item["prefillMs"] for item in results), 2),
         "medianDraftPrefillMs": round(statistics.median(item["draftPrefillMs"] for item in results), 2),
         "medianTargetPrefillMs": round(statistics.median(item["targetPrefillMs"] for item in results), 2),
         "medianBaselinePipelineMs": round(statistics.median(
             base["prefillMs"] + base["ms"] for base in baseline), 1) if baseline else None,
         "medianSpecPipelineMs": round(statistics.median(
-            item["targetPrefillMs"] + item["specMs"] for item in results), 1),
+            item["prefillMs"] + item["specMs"] for item in results), 1),
         "medianSpecFullMs": round(statistics.median(
             draft_encoder[index]["encode"] + target_encoder[index]["encode"]
-            + item["draftPrefillMs"] + item["targetPrefillMs"] + item["specMs"]
+            + item["prefillMs"] + item["specMs"]
             for index, item in enumerate(results)), 1),
         "medianSpecEndToEndMs": round(statistics.median(
             target_encoder[index]["preprocess"] + draft_encoder[index]["encode"]
-            + target_encoder[index]["encode"] + item["draftPrefillMs"]
-            + item["targetPrefillMs"] + item["specMs"]
+            + target_encoder[index]["encode"] + item["prefillMs"] + item["specMs"]
             for index, item in enumerate(results)), 1),
+        "medianBaselineEndToEndMs": round(statistics.median(
+            target_encoder[index]["preprocess"] + target_encoder[index]["encode"]
+            + base["prefillMs"] + base["ms"]
+            for index, base in enumerate(baseline)), 1) if baseline else None,
         "peakGiB": round(torch.cuda.max_memory_allocated() / 2**30, 2),
         "deviceFreeMiB": round(torch.cuda.mem_get_info()[0] / 2**20),
         "adapter": str(args.adapter) if args.adapter else None,
     }
     print(json.dumps(summary, indent=2))
+    _clock_line("after the run")
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(
         json.dumps({"summary": summary, "records": results, "baseline": baseline}, indent=2),
