@@ -162,6 +162,7 @@ class TensorRTW4A16Transcriber:
         except ImportError as exc:
             raise RuntimeError("Install the project environment with `uv sync`") from exc
 
+        from .features import GpuLogMel
         from .tensorrt_encoder import TensorRTAudioEncoder
         from .w4a16_decoder import W4A16ASRDecoder
 
@@ -171,6 +172,10 @@ class TensorRTW4A16Transcriber:
         self.torch = torch
         self.processor = AutoProcessor.from_pretrained(str(model_id))
         self.encoder = TensorRTAudioEncoder(Path(encoder_engine))
+        # The log-mel front end runs on the GPU and the prompt ids are cached per
+        # language, so the CPU only loads and resamples the audio.
+        self.mel = GpuLogMel(self.processor.feature_extractor)
+        self._templates: dict[str | None, object] = {}
         # `model_id` supplies the processor and config; the weights come from the
         # packed decoder directory when one is given.
         self.decoder_dir = Path(decoder_dir) if decoder_dir else Path(str(model_id))
@@ -184,23 +189,32 @@ class TensorRTW4A16Transcriber:
         self.last_language: str | None = None
         self.last_timings: dict[str, float] = {}
 
+    def _prompt(self, language: str | None):
+        from .features import PromptTemplate
+
+        template = self._templates.get(language)
+        if template is None:
+            template = PromptTemplate(self.processor, language, self.audio_token_id)
+            self._templates[language] = template
+        return template
+
     def transcribe(self, audio_path: Path, language: str | None = None) -> str:
         torch = self.torch
+        from .audio import load_audio
+        from .tensorrt_encoder import _post_cnn_tokens
+
         total_start = time.perf_counter()
-        inputs = self.processor.apply_transcription_request(
-            audio=load_audio(audio_path), language=language
-        )
+        features, mask, valid_frames = self.mel(load_audio(audio_path))
+        template = self._prompt(language)
+        ids = template(_post_cnn_tokens(valid_frames))
         torch.cuda.synchronize()
         preprocessing_ms = (time.perf_counter() - total_start) * 1000
 
         encoder_start = time.perf_counter()
-        features = inputs["input_features"]
-        mask = torch.ones((1, features.shape[-1]), dtype=torch.int32)
         embeddings = self.encoder.encode(features, mask).to(torch.float16)
         torch.cuda.synchronize()
         encoder_ms = (time.perf_counter() - encoder_start) * 1000
 
-        ids = inputs["input_ids"].to("cuda")
         hidden = self.embed[ids].masked_scatter(
             (ids == self.audio_token_id).unsqueeze(-1),
             embeddings.reshape(-1, embeddings.shape[-1]),

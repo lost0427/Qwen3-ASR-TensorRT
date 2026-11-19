@@ -193,9 +193,22 @@ Measured configurations on an 8 GB card:
 | 1.7B | 512 | no | 2048 slots fixed | 2694 MB | 20.6 ms prefill, 175.0 ms median, 1.988% WER |
 | 1.7B, long audio | 2048 | no | 2560 slots allocated | 2694 MB | 145 s file in one pass, 14.9 s total |
 
-The first two rows predate the per-request cache and used a fixed 2048-slot budget; the long-audio row uses the default ceiling.
+The first two rows predate the per-request cache and used a fixed 2048-slot budget; the long-audio row uses the default ceiling. All three also predate the GPU log-mel front end described below, which removes about 3.5 ms of preprocessing.
 
 The choice follows memory, not the model size: keep the projection inside the engine while the card still has room for it, and drop it when the engine plus the decoder weights leave too little. On 8 GB the 1.7B engine with the projection inside runs prefill at 222 ms, while the 1.14 GB 0.6B engine fits with no measurable cost.
+
+#### Log-mel front end
+
+`src/qwen3_asr_trt/features.py` builds the log-mel spectrogram on the GPU instead of going through `Qwen3ASRFeatureExtractor`, which runs `torch.stft` on the CPU. The arithmetic follows the reference: centred Hann STFT with the same reflection at both ends, power spectrum, the 128-band Slaney matrix, `log10` with the 1e-10 clamp, the `max - 8` floor and the `(x + 4) / 4` rescale, then a right pad of the mel axis to a multiple of `2 * n_window`. The transform length is rounded up to 30 s so cuFFT keeps a single plan, and the extra frames are cropped; the mel filters and window are built once per transcriber.
+
+Prompt ids are cached per language as well. The processor's template around the `<|audio_pad|>` run is fixed, so only the run length changes per utterance.
+
+| 32 test-clean utterances, one session | CPU front end | GPU front end |
+| --- | ---: | ---: |
+| Preprocessing (`load_audio` + mel + prompt) | 7.4 ms | 3.9 ms |
+| of which log-mel | 3.8-5.7 ms | 0.7 ms |
+
+The features match the CPU extractor to 5e-5, and both the explicit-language and the auto-detect paths produced transcripts identical to the CPU front end on all 32 utterances. The encoder and decoder stages are untouched by the change; what remains of preprocessing is the flac decode and resample.
 
 #### Longer audio
 
