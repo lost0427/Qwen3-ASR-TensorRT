@@ -48,7 +48,12 @@ SIZES = {
 EOS = (151643, 151645)
 
 
-def encode_pass(size: str, rows) -> tuple[list[dict], list[float]]:
+def encode_pass(size: str, rows) -> tuple[list[dict], list[dict]]:
+    """Feature extraction and the audio encoder, timed separately.
+
+    The mel front end is CPU work; the encoder is asynchronous until its own
+    synchronize, so both legs are measured to the host.
+    """
     from transformers import AutoProcessor
 
     from qwen3_asr_trt.audio import load_audio
@@ -64,10 +69,15 @@ def encode_pass(size: str, rows) -> tuple[list[dict], list[float]]:
         inputs = processor.apply_transcription_request(
             audio=load_audio(DATA / row["flac"]), language="English"
         )
+        preprocess_ms = (time.perf_counter() - started) * 1000
         features = inputs["input_features"]
         mask = torch.ones((1, features.shape[-1]), dtype=torch.int32)
+        torch.cuda.synchronize()
+        encoding = time.perf_counter()
         embeds = encoder.encode(features, mask).to(torch.float16)
-        timings.append((time.perf_counter() - started) * 1000)
+        torch.cuda.synchronize()
+        encode_ms = (time.perf_counter() - encoding) * 1000
+        timings.append({"preprocess": preprocess_ms, "encode": encode_ms})
         outputs.append({
             "ids": [int(value) for value in inputs["input_ids"][0].tolist()],
             "audio": embeds.reshape(-1, embeds.shape[-1]).cpu(),
@@ -132,7 +142,7 @@ def main() -> None:
                 "ids": record["ids"],
                 "audio": (audio @ weight).half().cpu(),
             })
-        draft_encoder = [0.0] * len(rows)
+        draft_encoder = [{"preprocess": 0.0, "encode": 0.0} for _ in rows]
     else:
         drafts, draft_encoder = encode_pass("0.6b", rows)
         targets, target_encoder = encode_pass("1.7b", rows)
@@ -141,6 +151,18 @@ def main() -> None:
     draft_decoder = build_decoder("0.6b", args.draft_prefill)
     target_decoder = build_decoder("1.7b", args.target_prefill)
     print(f"resident: {torch.cuda.memory_allocated() / 2**30:.2f} GiB", flush=True)
+
+    # The laptop GPU idles at ~210 MHz and only reaches its boost clock after a
+    # few seconds of work, so every measured stage is inflated without this.
+    warm = torch.randn(4096, 2048, device="cuda", dtype=torch.float16)
+    probe = torch.randn(512, 2048, device="cuda", dtype=torch.float16)
+    deadline = time.perf_counter() + 5.0
+    while time.perf_counter() < deadline:
+        for _ in range(20):
+            _ = probe @ warm.t()
+        torch.cuda.synchronize()
+    del warm, probe
+    torch.cuda.empty_cache()
 
     # Self-check: the target's own next tokens must all be accepted by `verify`.
     target_decoder.prefill_prompt(prompt(target_decoder, targets[0]), reserve=64)
@@ -170,9 +192,11 @@ def main() -> None:
     for index, (row, draft, target) in enumerate(zip(rows, drafts, targets), 1):
         started = time.perf_counter()
         draft_decoder.prefill_prompt(prompt(draft_decoder, draft), reserve=args.max_new_tokens)
+        torch.cuda.synchronize()
         draft_prefill_ms = (time.perf_counter() - started) * 1000
         started = time.perf_counter()
         target_decoder.prefill_prompt(prompt(target_decoder, target), reserve=args.max_new_tokens)
+        torch.cuda.synchronize()
         target_prefill_ms = (time.perf_counter() - started) * 1000
         draft_first = int(draft_decoder._token.item())
         target_first = int(target_decoder._token.item())
@@ -210,6 +234,7 @@ def main() -> None:
                 draft_graph.replay()
             draft_decoder._pos.copy_(target_decoder._pos)
             draft_decoder._token.copy_(target_decoder._token)
+        torch.cuda.synchronize()
         elapsed = (time.perf_counter() - started) * 1000
         results.append({
             "tokens": produced,
@@ -244,9 +269,11 @@ def main() -> None:
     for row, target in list(zip(rows, targets))[: args.baseline_limit]:
         started = time.perf_counter()
         target_decoder.prefill_prompt(prompt(target_decoder, target), reserve=args.max_new_tokens)
+        torch.cuda.synchronize()
         prefill_ms = (time.perf_counter() - started) * 1000
         started = time.perf_counter()
         tokens = target_decoder.decode_loop(args.max_new_tokens)
+        torch.cuda.synchronize()
         elapsed = (time.perf_counter() - started) * 1000
         if 151704 in tokens:
             tokens = tokens[tokens.index(151704) + 1:]
@@ -269,8 +296,14 @@ def main() -> None:
         "baselineUtterances": len(baseline),
         "identicalTranscripts": identical,
         "corpusWER": errors / max(1, words),
-        "medianDraftEncodeMs": round(statistics.median(draft_encoder), 2),
-        "medianTargetEncodeMs": round(statistics.median(target_encoder), 2),
+        "medianDraftEncodeMs": round(statistics.median(
+            item["encode"] for item in draft_encoder), 2),
+        "medianTargetEncodeMs": round(statistics.median(
+            item["encode"] for item in target_encoder), 2),
+        "medianDraftPreprocessMs": round(statistics.median(
+            item["preprocess"] for item in draft_encoder), 2),
+        "medianTargetPreprocessMs": round(statistics.median(
+            item["preprocess"] for item in target_encoder), 2),
         "medianDraftPrefillMs": round(statistics.median(item["draftPrefillMs"] for item in results), 2),
         "medianTargetPrefillMs": round(statistics.median(item["targetPrefillMs"] for item in results), 2),
         "medianBaselinePipelineMs": round(statistics.median(
@@ -278,7 +311,12 @@ def main() -> None:
         "medianSpecPipelineMs": round(statistics.median(
             item["targetPrefillMs"] + item["specMs"] for item in results), 1),
         "medianSpecFullMs": round(statistics.median(
-            draft_encoder[index] + target_encoder[index] + item["draftPrefillMs"]
+            draft_encoder[index]["encode"] + target_encoder[index]["encode"]
+            + item["draftPrefillMs"] + item["targetPrefillMs"] + item["specMs"]
+            for index, item in enumerate(results)), 1),
+        "medianSpecEndToEndMs": round(statistics.median(
+            target_encoder[index]["preprocess"] + draft_encoder[index]["encode"]
+            + target_encoder[index]["encode"] + item["draftPrefillMs"]
             + item["targetPrefillMs"] + item["specMs"]
             for index, item in enumerate(results)), 1),
         "peakGiB": round(torch.cuda.max_memory_allocated() / 2**30, 2),
