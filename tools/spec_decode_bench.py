@@ -107,12 +107,12 @@ def encode_pass(size: str, rows) -> tuple[list[dict], list[dict]]:
     return outputs, timings
 
 
-def build_decoder(size: str, prefill: Path | None = None):
+def build_decoder(size: str, prefill: Path | None = None, max_cache: int = 1024):
     from qwen3_asr_trt.w4a16_decoder import W4A16ASRDecoder
 
     config = SIZES[size]
     return W4A16ASRDecoder(str(config["packed"]), Path(prefill or config["prefill"]),
-                           max_cache=1024, group=32)
+                           max_cache=max_cache, group=32)
 
 
 def prompt(decoder, record) -> torch.Tensor:
@@ -135,6 +135,8 @@ def main() -> None:
                         help="project the target's audio embeddings into the draft's space "
                              "instead of running the small encoder")
     parser.add_argument("--draft-tokens", type=int, default=3)
+    parser.add_argument("--max-cache", type=int, default=1024,
+                        help="KV cache slots per decoder; lowering it frees memory")
     parser.add_argument("--max-new-tokens", type=int, default=192)
     parser.add_argument("--baseline-limit", type=int, default=24)
     parser.add_argument("--output", type=Path, default=ROOT / "artifacts/experiments/spec-decode.json")
@@ -167,8 +169,8 @@ def main() -> None:
         targets, target_encoder = encode_pass("1.7b", rows)
     print(f"encoder passes: {time.perf_counter() - started:.1f} s", flush=True)
 
-    draft_decoder = build_decoder("0.6b", args.draft_prefill)
-    target_decoder = build_decoder("1.7b", args.target_prefill)
+    draft_decoder = build_decoder("0.6b", args.draft_prefill, args.max_cache)
+    target_decoder = build_decoder("1.7b", args.target_prefill, args.max_cache)
     print(f"resident: {torch.cuda.memory_allocated() / 2**30:.2f} GiB", flush=True)
 
     # The laptop GPU idles at ~210 MHz and only reaches its boost clock after a

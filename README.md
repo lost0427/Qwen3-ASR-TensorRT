@@ -510,6 +510,17 @@ Running the two prefills concurrently on separate streams is also a negative
 result: 34.4 ms wall against 29.5 ms serial. Both passes are bandwidth-bound, so
 they queue behind one another and only pick up interference.
 
+Replacing the INT8 draft prefill with the fp16 one is a wash. The fp16 engine
+takes the stage from 12.4 to 9.9 ms and its better numerics raise acceptance from
+86.8% to 91.2%, but it needs 1,142 MB instead of 428 MB, and the resident set then
+leaves 0 MiB free — even with the KV caches cut from 1024 to 640 slots. At that
+pressure the decode drops from 1.22x to 1.12x, so the end-to-end total is
+unchanged (142.4 vs 146.7 ms against 142.1 vs 146.6), with no memory headroom
+left. An INT4 prefill written against the packed weights was also tried: a
+large-M kernel that reproduces the token-by-token decode bit for bit, 34 ms for a
+74-token prompt. It is compute-bound at about 1 T-MAC/s without tensor cores, so
+it loses to TensorRT's fp16 engine rather than to memory, and it is not used.
+
 The draft length was swept with the same benchmark. Three wins at the current
 acceptance rate, because a draft step costs 2.1 ms and the fourth candidate is the
 one most likely to be rejected:
