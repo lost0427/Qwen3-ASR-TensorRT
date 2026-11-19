@@ -199,16 +199,30 @@ The choice follows memory, not the model size: keep the projection inside the en
 
 #### Log-mel front end
 
-`src/qwen3_asr_trt/features.py` builds the log-mel spectrogram on the GPU instead of going through `Qwen3ASRFeatureExtractor`, which runs `torch.stft` on the CPU. The arithmetic follows the reference: centred Hann STFT with the same reflection at both ends, power spectrum, the 128-band Slaney matrix, `log10` with the 1e-10 clamp, the `max - 8` floor and the `(x + 4) / 4` rescale, then a right pad of the mel axis to a multiple of `2 * n_window`. The transform length is rounded up to 30 s so cuFFT keeps a single plan, and the extra frames are cropped; the mel filters and window are built once per transcriber.
+`src/qwen3_asr_trt/features.py` builds the log-mel spectrogram on the GPU instead of going through `Qwen3ASRFeatureExtractor`, which runs `torch.stft` on the CPU. The arithmetic follows the reference: centred Hann STFT with the same reflection at both ends, power spectrum, the 128-band Slaney matrix, `log10` with the 1e-10 clamp, the `max - 8` floor and the `(x + 4) / 4` rescale, then a right pad of the mel axis to a multiple of `2 * n_window`. Prompt ids are cached per language as well: the processor's template around the `<|audio_pad|>` run is fixed, so only the run length changes per utterance.
 
-Prompt ids are cached per language as well. The processor's template around the `<|audio_pad|>` run is fixed, so only the run length changes per utterance.
+The transform length is rounded up to 3 s so cuFFT keeps a small set of plans; a 30 s bucket cost 1.0 ms per utterance instead of 0.66 because it always transformed 30 s of mostly padding. The padding only reaches the frames past the end of the audio, which are cropped off again, so the output is unchanged.
 
-| 32 test-clean utterances, one session | CPU front end | GPU front end |
+32 test-clean utterances, one session, median:
+
+| | ms |
+| --- | ---: |
+| log-mel, Transformers CPU extractor | 5.0 |
+| log-mel, this GPU front end | **0.66** |
+| log-mel, native C++ GPU kernel | 0.65 (0.73 forced, 2.37 for its `pocketfft` path) |
+| preprocessing in the transcriber (flac decode + mel + prompt) | 3.0 |
+
+The native runtime has its own front end, so the whole pipeline can be compared stage by stage on the same audio and in the same session:
+
+| 32 test-clean utterances | native C++ | this runtime |
 | --- | ---: | ---: |
-| Preprocessing (`load_audio` + mel + prompt) | 7.4 ms | 3.9 ms |
-| of which log-mel | 3.8-5.7 ms | 0.7 ms |
+| log-mel | 0.65 | 0.66 |
+| encoder | 6.54 | 6.56 |
+| decoder prefill | 16.30 | 16.72 |
+| decode | 117.14 | 116.69 |
+| reported total | 140.6 | 143.7 |
 
-The features match the CPU extractor to 5e-5, and both the explicit-language and the auto-detect paths produced transcripts identical to the CPU front end on all 32 utterances. The encoder and decoder stages are untouched by the change; what remains of preprocessing is the flac decode and resample.
+The native total starts after the audio is decoded, while this runtime's preprocessing (3.0 ms) includes the 1.8 ms flac decode; subtracting that puts the two totals at 140.6 and 141.9 ms. The remaining 1.3 ms is the decoder prefill (0.4 ms) plus prompt assembly and Python overhead; the mel front end itself is at parity with the C++ kernel. The features match the CPU extractor to 5e-5, and both the explicit-language and the auto-detect paths produced transcripts identical to the CPU front end on all 32 utterances.
 
 #### Longer audio
 
