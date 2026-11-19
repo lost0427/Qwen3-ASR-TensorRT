@@ -485,6 +485,12 @@ and the batched verify 7.3 ms against 5.1 for a single-row step. The batched GEM
 runs at 121 GB/s against the single-row kernel's 181, because every output row
 re-reads the block's activations.
 
+The saving scales with the transcript, so the median of the two latency
+distributions understates it: pairing every utterance with its own baseline, the
+median saving is 17.9 ms, 26 of 32 are faster, and the gains run from about −45 ms
+on the longest transcripts to +15 ms on the shortest, where the draft prefill
+cannot be amortised.
+
 The median stage budget of the speculative path:
 
 | stage | ms | share |
