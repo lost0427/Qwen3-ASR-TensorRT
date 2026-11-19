@@ -394,11 +394,15 @@ class W4A16ASRDecoder:
         self._generated = torch.zeros((1,), dtype=torch.long, device=cuda)
         self._logits = torch.empty((1, self.vocab), dtype=torch.float16, device=cuda)
         self._attn_out = torch.empty((1, self.heads * self.head_dim), dtype=torch.float16, device=cuda)
+        self._h_out = torch.zeros((1, self.hidden), dtype=torch.float16, device=cuda)
+        self.heads_w1: list = []
+        self.heads_w2: list = []
         self._captured: torch.cuda.CUDAGraph | None = None
         # Speculative verification: one batched step per draft width.
         self._verify_graphs: dict[int, torch.cuda.CUDAGraph] = {}
         self._v_ids = torch.zeros((1, 8), dtype=torch.long, device=cuda)
         self._v_predicted = torch.zeros((1, 8), dtype=torch.long, device=cuda)
+        self._v_hidden = torch.zeros((1, 8, self.hidden), dtype=torch.float16, device=cuda)
         # Same starting capacity as the native runtime (512 slots, 56 MB).
         self._allocate(max(512, max_cache))
         # Packing the projections allocates large FP32 temporaries; return them to
@@ -473,6 +477,30 @@ class W4A16ASRDecoder:
         gated = extension().silu_mul(gate_up, self.intermediate)
         return self.down[index](gated, hidden)
 
+    def candidate_tokens(self, hidden: Tensor, count: int) -> list[int]:
+        """Proposes tokens from a post-norm hidden state with the fitted heads.
+
+        ``hidden`` is the final-norm output of the last accepted position; each
+        head adds a residual MLP to it and the shared packetised LM head scores
+        the results in one pass.
+        """
+        torch = self.torch
+        if not self.heads_w1:
+            raise RuntimeError("no prediction heads attached")
+        x = hidden.view(1, -1)
+        rows = []
+        for w1, w2 in zip(self.heads_w1, self.heads_w2):
+            rows.append(x + F.silu(x @ w1.t()) @ w2.t())
+        stacked = torch.cat(rows, 0)
+        logits = self.lm_head.gemm(stacked)
+        return [int(value) for value in logits.argmax(-1).tolist()[:count]]
+
+    def load_heads(self, path: str | Path) -> None:
+        torch = self.torch
+        state = torch.load(str(path), map_location="cpu")
+        self.heads_w1 = [value.to("cuda", torch.float16).contiguous() for value in state["w1"]]
+        self.heads_w2 = [value.to("cuda", torch.float16).contiguous() for value in state["w2"]]
+
     def _step(self) -> None:
         torch = self.torch
         pos = self._pos
@@ -481,7 +509,9 @@ class W4A16ASRDecoder:
         hidden = F.embedding(self._token.view(1, 1), self.embed)
         for index in range(self.layers):
             hidden = self._layer(index, hidden, pos, cos, sin)
-        logits = self.lm_head(self.final_norm(hidden))
+        normed = self.final_norm(hidden)
+        self._h_out.copy_(normed.view(1, -1))
+        logits = self.lm_head(normed)
         self._logits.copy_(logits.view(1, -1))
         token = logits.argmax(-1).view(1)
         self._token.copy_(token)
@@ -532,7 +562,12 @@ class W4A16ASRDecoder:
         )
         if head.dtype != torch.float16:
             head = head.to(torch.float16)
-        logits = head if self.prefill.emits_logits else self.lm_head(head)
+        if self.prefill.emits_logits:
+            logits = head
+        else:
+            normed = self.final_norm(head)
+            self._h_out.copy_(normed.view(1, -1))
+            logits = self.lm_head(normed)
         seq = cache_k.shape[0]
         for index in range(self.layers):
             self.cache_k[index][:, :, :seq] = cache_k[:, index].permute(1, 0, 2).unsqueeze(0)
@@ -639,7 +674,9 @@ class W4A16ASRDecoder:
             gated = ext.silu_mul_rows(gate_up, rows, self.intermediate)
             hidden = self.down[index].gemm(gated, hidden)
 
-        logits = self.lm_head.gemm(self.final_norm(hidden))
+        normed = self.final_norm(hidden)
+        self._v_hidden[:, :rows].copy_(normed)
+        logits = self.lm_head.gemm(normed)
         self._v_predicted[:, :rows].copy_(logits.argmax(-1))
 
     def _verify_graph(self, rows: int) -> "torch.cuda.CUDAGraph":

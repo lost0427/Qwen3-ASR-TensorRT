@@ -134,6 +134,8 @@ def main() -> None:
     parser.add_argument("--adapter", type=Path,
                         help="project the target's audio embeddings into the draft's space "
                              "instead of running the small encoder")
+    parser.add_argument("--heads", type=Path,
+                        help="use fitted prediction heads on the target instead of a draft model")
     parser.add_argument("--draft-tokens", type=int, default=3)
     parser.add_argument("--max-cache", type=int, default=1024,
                         help="KV cache slots per decoder; lowering it frees memory")
@@ -153,7 +155,11 @@ def main() -> None:
     rows = rows[: args.limit]
 
     started = time.perf_counter()
-    if args.adapter:
+    if args.heads:
+        targets, target_encoder = encode_pass("1.7b", rows)
+        drafts = [{"ids": record["ids"], "audio": record["audio"]} for record in targets]
+        draft_encoder = [{"preprocess": 0.0, "encode": 0.0} for _ in rows]
+    elif args.adapter:
         targets, target_encoder = encode_pass("1.7b", rows)
         weight = torch.load(args.adapter, map_location="cpu")["weight"].float().to("cuda")
         drafts = []
@@ -169,8 +175,10 @@ def main() -> None:
         targets, target_encoder = encode_pass("1.7b", rows)
     print(f"encoder passes: {time.perf_counter() - started:.1f} s", flush=True)
 
-    draft_decoder = build_decoder("0.6b", args.draft_prefill, args.max_cache)
+    draft_decoder = None if args.heads else build_decoder("0.6b", args.draft_prefill, args.max_cache)
     target_decoder = build_decoder("1.7b", args.target_prefill, args.max_cache)
+    if args.heads:
+        target_decoder.load_heads(args.heads)
     print(f"resident: {torch.cuda.memory_allocated() / 2**30:.2f} GiB", flush=True)
 
     # The laptop GPU idles at ~210 MHz and only reaches its boost clock after a
@@ -209,6 +217,39 @@ def main() -> None:
                 current.append(min(current[-1] + 1, row_values[j + 1] + 1, row_values[j] + (token != other)))
             row_values = current
         return row_values[-1], len(left)
+
+    def heads_pass(target):
+        started = time.perf_counter()
+        target_decoder.prefill_prompt(prompt(target_decoder, target), reserve=args.max_new_tokens)
+        torch.cuda.synchronize()
+        prefill_ms = (time.perf_counter() - started) * 1000
+        target_first = int(target_decoder._token.item())
+        produced = [target_first]
+        accepted = proposed = rounds = 0
+        width = len(target_decoder.heads_w1)
+        candidates = target_decoder.candidate_tokens(target_decoder._h_out, width)[1:]
+        started = time.perf_counter()
+        while len(produced) < args.max_new_tokens and produced[-1] not in EOS:
+            matched, emitted = target_decoder.verify(candidates)
+            produced.extend(emitted)
+            accepted += matched
+            proposed += len(candidates)
+            rounds += 1
+            candidates = target_decoder.candidate_tokens(
+                target_decoder._v_hidden[:, matched], width)[1:]
+        torch.cuda.synchronize()
+        elapsed = (time.perf_counter() - started) * 1000
+        return {
+            "tokens": produced,
+            "firstMatches": 1,
+            "accepted": accepted,
+            "proposed": proposed,
+            "rounds": rounds,
+            "specMs": elapsed,
+            "prefillMs": prefill_ms,
+            "draftPrefillMs": 0.0,
+            "targetPrefillMs": prefill_ms,
+        }
 
     def spec_pass(draft, target):
         started = time.perf_counter()
@@ -295,7 +336,7 @@ def main() -> None:
                     continue
                 baseline = plain_pass(target)
             else:
-                record.update(spec_pass(draft, target))
+                record.update(heads_pass(target) if args.heads else spec_pass(draft, target))
         results.append(record)
         if baseline is not None:
             baselines.append(baseline)

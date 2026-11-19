@@ -512,6 +512,21 @@ not being turned into an INT8 matmul either way. Building with `--opt-seq 128` f
 the short prompts changes nothing measurable; `--opt-seq 512` is slightly better
 across 64-512 tokens.
 
+**Prediction heads on the target** were the last thing tried, and they lose.
+`tools/collect_medusa.py` captures 34,759 final-norm hidden states with the three
+tokens that follow each one, from 800 train-clean-100 utterances.
+`tools/fit_medusa_heads.py` fits four residual heads (`h + W2 . silu(W1 h)`, `W2`
+zero-initialised) and scores them through the quantised LM head the runtime uses,
+so training sees the same projection: validation accuracy is 99.0%, 56.0%, 16.9%
+and 7.0% for the next one, two, three and four tokens. In the loop the heads read
+the hidden state of the accepted row, which lags the last emitted token by one
+position, so only three of the four produce candidates for the next round. That
+measures 0.56 accepted tokens per round, decode 125.7 ms against the target's
+116.3 (0.93x) and end-to-end 156.2 against 148.1. It removes the draft model, its
+prefill and leaves 2.2 GiB free, but three residual MLPs over a single hidden state
+are a far weaker predictor than three steps of the 0.6B model, which accepts 2.6
+tokens per round on the same audio.
+
 Running the two prefills concurrently on separate streams is also a negative
 result: 34.4 ms wall against 29.5 ms serial. Both passes are bandwidth-bound, so
 they queue behind one another and only pick up interference.
