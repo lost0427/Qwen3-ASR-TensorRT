@@ -82,10 +82,14 @@ jobs:
         run: |
           ./native/build/build-engine.exe --version
           ./native/build/build-engine.exe --help | Out-Null
-          # The runtime prints usage and exits 2 when no arguments are given.
-          $PSNativeCommandUseErrorActionPreference = $false
-          $usage = & ./native/build/qwen3-asr-native.exe 2>&1
-          if (-not ($usage -match 'usage:')) { throw "runtime did not start" }
+          # The runtime prints usage and exits 2 without arguments; Start-Process
+          # keeps that exit code from failing the step on any PowerShell version.
+          $out = Join-Path $env:RUNNER_TEMP 'runtime-usage.txt'
+          $process = Start-Process -FilePath './native/build/qwen3-asr-native.exe' `
+            -NoNewWindow -Wait -PassThru -RedirectStandardOutput $out -RedirectStandardError "$out.err"
+          $usage = (Get-Content $out -Raw -ErrorAction SilentlyContinue) +
+            (Get-Content "$out.err" -Raw -ErrorAction SilentlyContinue)
+          if ($usage -notmatch 'usage:') { throw "runtime did not start (exit $($process.ExitCode))" }
 
       - name: Package
         shell: pwsh
