@@ -62,16 +62,30 @@ if(QASR_BUILD_RUNTIME)
 endif()
 
 if(QASR_BUILD_TOOLS)
-  # TensorRT headers include cuda_runtime_api.h, so the toolkit is needed for its
-  # headers even though build-engine has no kernels and never calls nvcc. The pip
-  # cudart wheel ships an incomplete header set and cannot be used here.
+  # TensorRT headers include cuda_runtime_api.h, so CUDA headers are needed even
+  # though build-engine has no kernels and never calls nvcc. Prefer a full
+  # toolkit; the pip runtime wheel ships the flat headers and the nvcc wheel
+  # ships include/crt, so those two together also work without an installer.
   find_package(CUDAToolkit QUIET)
-  if(NOT CUDAToolkit_FOUND)
-    message(FATAL_ERROR "CUDA headers not found; install the CUDA toolkit to build build-engine")
+  if(CUDAToolkit_FOUND)
+    set(_cuda_includes ${CUDAToolkit_INCLUDE_DIRS})
+  else()
+    set(_cuda_includes "")
+    foreach(_cuda_dir
+        "${PYTHON_SITE}/nvidia/cuda_runtime/include"
+        "${PYTHON_SITE}/nvidia/cuda_nvcc/include")
+      if(EXISTS "${_cuda_dir}")
+        list(APPEND _cuda_includes "${_cuda_dir}")
+      endif()
+    endforeach()
+    if(NOT _cuda_includes)
+      message(FATAL_ERROR
+        "CUDA headers not found; install the CUDA toolkit, or install nvidia-cuda-runtime-cu12 and nvidia-cuda-nvcc-cu12")
+    endif()
   endif()
 
   add_executable(build-engine tools/build_engine.cpp)
-  target_include_directories(build-engine PRIVATE "${TENSORRT_ROOT}/include" ${CUDAToolkit_INCLUDE_DIRS})
+  target_include_directories(build-engine PRIVATE "${TENSORRT_ROOT}/include" ${_cuda_includes})
   target_link_libraries(build-engine PRIVATE
     "${TENSORRT_ROOT}/lib/nvinfer_11.lib"
     "${TENSORRT_ROOT}/lib/nvonnxparser_11.lib"

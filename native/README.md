@@ -113,10 +113,11 @@ cmake --build native/build --target build-engine
 `QASR_BUILDER_ARCH` is the compute capability of the card that will run the
 build (75, 80, 86, 89, 90, 100, 120); TensorRT 11 loads
 `nvinfer_builder_resource_sm<arch>_11.dll` and refuses to start the builder
-without the exact one. The CUDA toolkit is needed for headers only, because
-TensorRT headers include `cuda_runtime_api.h` and the pip cudart wheel ships an
-incomplete include tree; nvcc is never invoked. The release zips bundle the
-runtime DLLs, so an end user needs neither Python nor the CUDA toolkit.
+without the exact one. CUDA headers are needed because TensorRT headers include
+`cuda_runtime_api.h`; a full toolkit works, and so do the pip packages
+`nvidia-cuda-runtime-cu12` (flat headers) together with `nvidia-cuda-nvcc-cu12`
+(`include/crt`). nvcc is never invoked. The release zips bundle the runtime
+DLLs, so an end user needs neither Python nor the CUDA toolkit.
 
 Tagged `native-v*` pushes build the executable and publish one zip per compute
 capability from `.github/workflows/native-release.yml`.
