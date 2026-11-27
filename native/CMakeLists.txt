@@ -62,22 +62,16 @@ if(QASR_BUILD_RUNTIME)
 endif()
 
 if(QASR_BUILD_TOOLS)
-  # TensorRT headers include cuda_runtime_api.h. Accept it from the pip runtime
-  # wheel (no CUDA toolkit needed) or from an installed toolkit.
-  set(_cuda_includes "")
-  if(EXISTS "${PYTHON_SITE}/nvidia/cuda_runtime/include")
-    list(APPEND _cuda_includes "${PYTHON_SITE}/nvidia/cuda_runtime/include")
-  endif()
+  # TensorRT headers include cuda_runtime_api.h, so the toolkit is needed for its
+  # headers even though build-engine has no kernels and never calls nvcc. The pip
+  # cudart wheel ships an incomplete header set and cannot be used here.
   find_package(CUDAToolkit QUIET)
-  if(CUDAToolkit_FOUND)
-    list(APPEND _cuda_includes ${CUDAToolkit_INCLUDE_DIRS})
-  endif()
-  if(NOT _cuda_includes)
-    message(FATAL_ERROR "cuda_runtime headers not found; install nvidia-cuda-runtime-cu12 or the CUDA toolkit")
+  if(NOT CUDAToolkit_FOUND)
+    message(FATAL_ERROR "CUDA headers not found; install the CUDA toolkit to build build-engine")
   endif()
 
   add_executable(build-engine tools/build_engine.cpp)
-  target_include_directories(build-engine PRIVATE "${TENSORRT_ROOT}/include" ${_cuda_includes})
+  target_include_directories(build-engine PRIVATE "${TENSORRT_ROOT}/include" ${CUDAToolkit_INCLUDE_DIRS})
   target_link_libraries(build-engine PRIVATE
     "${TENSORRT_ROOT}/lib/nvinfer_11.lib"
     "${TENSORRT_ROOT}/lib/nvonnxparser_11.lib"

@@ -17,8 +17,8 @@ jobs:
         with:
           python-version: "3.12"
 
-      # Only the TensorRT runtime and cudart are needed: build-engine has no CUDA
-      # kernels of its own, so the runner does not install the CUDA toolkit.
+      # TensorRT runtime plus cudart: the pip cudart wheel supplies the DLL, and
+      # the CUDA toolkit below supplies the headers build-engine compiles against.
       - name: Install TensorRT runtime
         shell: pwsh
         run: |
@@ -40,6 +40,14 @@ jobs:
               "$($matches[1])=$($matches[2])" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
             }
           }
+
+      # The pip cudart wheel ships an incomplete include tree (no crt/ directory),
+      # so the toolkit is installed for its headers. build-engine has no kernels
+      # and does not invoke nvcc.
+      - uses: Jimver/cuda-toolkit@v0.2.16
+        with:
+          cuda: "12.8.0"
+          method: network
 
       - name: Fetch TensorRT headers and import libraries
         shell: pwsh
