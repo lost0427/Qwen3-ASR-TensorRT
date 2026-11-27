@@ -82,6 +82,8 @@ jobs:
         run: |
           ./native/build/build-engine.exe --version
           ./native/build/build-engine.exe --help | Out-Null
+          # The runtime prints usage and exits 2 when no arguments are given.
+          $PSNativeCommandUseErrorActionPreference = $false
           $usage = & ./native/build/qwen3-asr-native.exe 2>&1
           if (-not ($usage -match 'usage:')) { throw "runtime did not start" }
 
