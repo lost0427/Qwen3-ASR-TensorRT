@@ -28,13 +28,13 @@ jobs:
       - name: Fetch TensorRT headers and import libraries
         shell: pwsh
         run: |
-          $site = python -c "import site; print(site.getsitepackages()[0])"
+          $site = python -c "import sysconfig; print(sysconfig.get_paths()['purelib'])"
           ./native/scripts/fetch_deps.ps1 -PythonSite $site
 
       - name: Configure
         shell: pwsh
         run: |
-          $site = python -c "import site; print(site.getsitepackages()[0])"
+          $site = python -c "import sysconfig; print(sysconfig.get_paths()['purelib'])"
           cmake -S native -B native/build -G "Visual Studio 17 2022" -A x64 `
             -DQASR_BUILD_RUNTIME=OFF "-DPYTHON_SITE=$site"
 
@@ -54,7 +54,7 @@ jobs:
       - name: Package
         shell: pwsh
         run: |
-          $site = python -c "import site; print(site.getsitepackages()[0])"
+          $site = python -c "import sysconfig; print(sysconfig.get_paths()['purelib'])"
           # TensorRT loads one builder resource per compute capability, so each
           # GPU family gets its own self-contained zip.
           foreach ($arch in @("sm75", "sm80", "sm86", "sm89", "sm90", "sm100", "sm120")) {
