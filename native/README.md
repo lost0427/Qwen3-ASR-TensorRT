@@ -71,7 +71,7 @@ the full 80 x 201 product.
 ## Build
 
 ```powershell
-native\scripts\fetch_deps.ps1        # TensorRT headers, import library, pocketfft
+native\scripts\fetch_deps.ps1        # TensorRT headers, import libraries, pocketfft
 cmake -S native -B native/build -G Ninja
 cmake --build native/build
 ```
@@ -80,6 +80,45 @@ cmake --build native/build
 branch `release/11.4` (matching the 11.4.0.106 wheel), the single-header
 `pocketfft_hdronly.h`, and builds `nvinfer_11.lib` from the `nvinfer_11.dll` in
 `tensorrt_libs`. `native/deps`, `native/build` and `native/assets` are ignored.
+
+## Build engines without Python
+
+`build-engine` builds a TensorRT engine from a published ONNX graph, using the
+same optimization profile as the Python builder. It needs the TensorRT runtime
+only: no PyTorch, no ONNX package, and no `uv`. The ONNX graphs are published on
+Hugging Face, so the whole path is download, build, run:
+
+```powershell
+build-engine.exe --onnx encoder-window.bf16.onnx --out encoder-window.bf16.engine
+build-engine.exe --onnx encoder-window.fp16.onnx --out encoder-window.fp16.engine
+build-engine.exe --onnx asr-prefill.onnx --out asr-prefill.fp16.engine --max-seq 512
+```
+
+The graph kind is detected from the input names. `--max-frames` and `--max-seq`
+have to stay inside the bounds baked into the ONNX at export time; a wider
+window or a longer prompt needs a fresh export. `--parse-only` prints the graph
+without building, `--help` lists the profile options, and every build writes
+`<engine>.json` with the TensorRT version, CUDA architecture and profile shapes.
+Keep the `<file>.onnx.data` next to its `.onnx`.
+
+`build-engine` has no CUDA kernels of its own, so it compiles without nvcc. It
+does need the CUDA runtime headers (TensorRT headers include `cuda_runtime_api.h`)
+and the TensorRT builder resource for the target GPU:
+
+```powershell
+cmake -S native -B native/build -G Ninja -DQASR_BUILD_RUNTIME=OFF -DQASR_BUILDER_ARCH=89
+cmake --build native/build --target build-engine
+```
+
+`QASR_BUILDER_ARCH` is the compute capability of the card that will run the
+build (75, 80, 86, 89, 90, 100, 120); TensorRT 11 loads
+`nvinfer_builder_resource_sm<arch>_11.dll` and refuses to start the builder
+without the exact one. The headers come from an installed CUDA toolkit or from
+`nvidia-cuda-runtime-cu12`; the release zips bundle the runtime DLLs, so an
+end user needs neither Python nor the CUDA toolkit.
+
+Tagged `native-v*` pushes build the executable and publish one zip per compute
+capability from `.github/workflows/native-release.yml`.
 
 ## Assets
 
