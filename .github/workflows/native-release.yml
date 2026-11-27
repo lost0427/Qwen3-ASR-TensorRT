@@ -9,7 +9,9 @@ permissions:
 
 jobs:
   build:
-    runs-on: windows-latest
+    # windows-latest ships Visual Studio 2026, which CUDA 12.8 cannot parse;
+    # the 2022 image has the VS 2022 toolset nvcc supports.
+    runs-on: windows-2022
     steps:
       - uses: actions/checkout@v4
 
