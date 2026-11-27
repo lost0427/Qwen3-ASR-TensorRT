@@ -18,6 +18,11 @@ if(QASR_BUILD_RUNTIME)
   set(CMAKE_CUDA_ARCHITECTURES "75;80;86;89;90;100;120" CACHE STRING
     "CUDA architectures compiled into the decode kernels; the release exe is a fat binary")
 
+  # nvcc ships a conservative host-compiler version gate; newer MSVC releases
+  # work but are rejected until CUDA catches up, so opt into the override.
+  if(MSVC)
+    set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} -allow-unsupported-compiler" CACHE STRING "nvcc flags")
+  endif()
   enable_language(CUDA)
   find_package(CUDAToolkit REQUIRED)
 
