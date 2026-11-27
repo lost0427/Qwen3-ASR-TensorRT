@@ -17,13 +17,18 @@ jobs:
         with:
           python-version: "3.12"
 
-      # TensorRT runtime plus the two CUDA wheels: cudart supplies the DLL and the
-      # flat headers, nvcc supplies include/crt. No toolkit installer is needed.
+      # TensorRT runtime plus the two CUDA wheels: cudart supplies the DLL and then
+      # the CUDA toolkit below supplies headers and nvcc for the runtime kernels.
       - name: Install TensorRT runtime
         shell: pwsh
         run: |
           python -m pip install --disable-pip-version-check `
-            "tensorrt-cu12==11.4.0.106" "nvidia-cuda-runtime-cu12>=12.8" "nvidia-cuda-nvcc-cu12"
+            "tensorrt-cu12==11.4.0.106" "nvidia-cuda-runtime-cu12>=12.8" "soundfile"
+
+      - uses: Jimver/cuda-toolkit@v0.2.36
+        with:
+          cuda: "12.8.0"
+          method: network
 
       # The runner's Visual Studio is newer than this CMake knows about, so use
       # vswhere to import the MSVC environment and build with Ninja.
@@ -47,25 +52,35 @@ jobs:
           $site = python -c "import sysconfig; print(sysconfig.get_paths()['purelib'])"
           ./native/scripts/fetch_deps.ps1 -PythonSite $site
 
+      # The runtime reads mel filters and the tokenizer from native/assets, which
+      # only need the small config files of the checkpoint.
+      - name: Generate native assets
+        shell: pwsh
+        run: |
+          python -m pip install --disable-pip-version-check "huggingface_hub" "transformers>=5.13,<6"
+          python -c "from huggingface_hub import snapshot_download; snapshot_download('Qwen/Qwen3-ASR-0.6B-hf', allow_patterns=['*.json', '*.txt'], local_dir='.ci/qwen3-asr-0.6b-hf')"
+          python native/tools/gen_assets.py --model .ci/qwen3-asr-0.6b-hf --out native/assets
+
       - name: Configure
         shell: pwsh
         run: |
           $site = python -c "import sysconfig; print(sysconfig.get_paths()['purelib'])"
-          cmake -S native -B native/build -G Ninja `
-            -DQASR_BUILD_RUNTIME=OFF "-DPYTHON_SITE=$site"
+          cmake -S native -B native/build -G Ninja "-DPYTHON_SITE=$site"
 
       - name: Build
         shell: pwsh
         run: cmake --build native/build
 
-      # There is no GPU on the runner, so this checks that the binary starts with
-      # every TensorRT and CUDA DLL resolved. Building an engine needs a device
-      # and is verified by hand on the target machine.
+      # There is no GPU on the runner, so this checks that both binaries start with
+      # every TensorRT, CUDA and libsndfile DLL resolved. Building an engine and
+      # transcribing need a device and are verified by hand on the target machine.
       - name: Smoke test
         shell: pwsh
         run: |
           ./native/build/build-engine.exe --version
           ./native/build/build-engine.exe --help | Out-Null
+          $usage = & ./native/build/qwen3-asr-native.exe 2>&1
+          if (-not ($usage -match 'usage:')) { throw "runtime did not start" }
 
       - name: Package
         shell: pwsh
@@ -96,5 +111,5 @@ jobs:
           } else {
             gh release create $tag dist/*.zip dist/*.sha256 `
               --title $tag `
-              --notes "Prebuilt build-engine.exe for TensorRT 11.4: builds .engine files from the published ONNX graphs without Python. Pick the zip for your GPU compute capability - sm75 Turing (T4, RTX 20), sm80 A100, sm86 RTX 30, sm89 RTX 40, sm90 H100, sm100 Blackwell, sm120 RTX 50. Check it with 'nvidia-smi --query-gpu=compute_cap --format=csv,noheader'."
+              --notes "Prebuilt native runtime for TensorRT 11.4: qwen3-asr-native.exe transcribes and qwen3-asr-build-engine builds .engine files from the published ONNX graphs, without Python. The runtime is a fat binary for sm75 to sm120; pick the build-engine zip for your GPU compute capability (TensorRT builder resources are per architecture) - sm75 Turing (T4, RTX 20), sm80 A100, sm86 RTX 30, sm89 RTX 40, sm90 H100, sm100 Blackwell, sm120 RTX 50. Check it with 'nvidia-smi --query-gpu=compute_cap --format=csv,noheader'. Forced alignment additionally needs qwen3-asr-aligner-assets.zip."
           }

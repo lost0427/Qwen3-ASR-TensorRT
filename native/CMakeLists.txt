@@ -15,7 +15,8 @@ set(QASR_BUILDER_ARCH "89" CACHE STRING "Compute capability whose TensorRT build
 # machine without nvcc. Configure with -DQASR_BUILD_RUNTIME=OFF for that.
 if(QASR_BUILD_RUNTIME)
   set(CMAKE_CUDA_STANDARD 17)
-  set(CMAKE_CUDA_ARCHITECTURES 89 CACHE STRING "CUDA architectures compiled into the decode kernels")
+  set(CMAKE_CUDA_ARCHITECTURES "75;80;86;89;90;100;120" CACHE STRING
+    "CUDA architectures compiled into the decode kernels; the release exe is a fat binary")
 
   enable_language(CUDA)
   find_package(CUDAToolkit REQUIRED)

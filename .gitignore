@@ -9,6 +9,6 @@ dist/
 /qwen3-asr.spec
 
 native/deps/
-native/build/
+native/build*/
 native/assets/
 

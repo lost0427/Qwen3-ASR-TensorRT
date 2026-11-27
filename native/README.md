@@ -119,8 +119,14 @@ without the exact one. CUDA headers are needed because TensorRT headers include
 (`include/crt`). nvcc is never invoked. The release zips bundle the runtime
 DLLs, so an end user needs neither Python nor the CUDA toolkit.
 
-Tagged `native-v*` pushes build the executable and publish one zip per compute
-capability from `.github/workflows/native-release.yml`.
+Tagged `native-v*` pushes build both executables and publish one zip per compute
+capability from `.github/workflows/native-release.yml`. Each zip contains
+`qwen3-asr-native.exe` (a fat binary covering sm75 to sm120),
+`build-engine.exe`, the TensorRT and CUDA runtime DLLs, `libsndfile`, and the
+`assets/mel.bin` + `assets/tokenizer.bin` the runtime reads. Forced alignment
+additionally needs `qwen3-asr-aligner-assets.zip` from the same release.
+`CMAKE_CUDA_ARCHITECTURES` defaults to `75;80;86;89;90;100;120`; narrow it to
+cut build time when you only target one card.
 
 ## Assets
 
