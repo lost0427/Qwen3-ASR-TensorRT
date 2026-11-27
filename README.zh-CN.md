@@ -47,6 +47,7 @@ uv sync --extra quantization     # quantize-encoder（INT8 Q/DQ）
 - [0.6B W4A16 decoder，AWQ group 32](https://huggingface.co/Retrieve0/Qwen3-ASR-0.6B-W4A16-Decoder)
 - [0.6B W4A16 decoder，预打包 INT4，group 32](https://huggingface.co/Retrieve0/Qwen3-ASR-0.6B-W4A16-Decoder-INT4)（下载更小，仅含 decoder）
 - [Qwen3-ForcedAligner 0.6B TensorRT encoder](https://huggingface.co/Retrieve0/Qwen3-ForcedAligner-0.6B-TensorRT-Encoder)
+- [Qwen3-ForcedAligner 0.6B TensorRT decoder：BF16 和 FP16 ONNX](https://huggingface.co/Retrieve0/Qwen3-ForcedAligner-0.6B-TensorRT-Decoder)
 - [Qwen3-ForcedAligner 0.6B EXL3 4 bpw decoder](https://huggingface.co/Retrieve0/Qwen3-ForcedAligner-0.6B-EXL3-Decoder)
 
 legacy 3 bpw 和 4 bpw 使用 ExLlamaV3 默认校准数据量化。`train-clean-100` 版本使用 LibriSpeech `train-clean-100` 校准，针对 LibriSpeech 风格的英语朗读调优；通用音频和中文 ASR 仍默认推荐 legacy 版本。

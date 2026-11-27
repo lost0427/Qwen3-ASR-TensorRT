@@ -47,6 +47,7 @@ Published model files:
 - [0.6B W4A16 decoder, AWQ group 32](https://huggingface.co/Retrieve0/Qwen3-ASR-0.6B-W4A16-Decoder)
 - [0.6B W4A16 decoder, packed INT4, group 32](https://huggingface.co/Retrieve0/Qwen3-ASR-0.6B-W4A16-Decoder-INT4) (smaller download, decoder only)
 - [Qwen3-ForcedAligner 0.6B TensorRT encoder](https://huggingface.co/Retrieve0/Qwen3-ForcedAligner-0.6B-TensorRT-Encoder)
+- [Qwen3-ForcedAligner 0.6B TensorRT decoder: BF16 and FP16 ONNX](https://huggingface.co/Retrieve0/Qwen3-ForcedAligner-0.6B-TensorRT-Decoder)
 - [Qwen3-ForcedAligner 0.6B EXL3 4 bpw decoder](https://huggingface.co/Retrieve0/Qwen3-ForcedAligner-0.6B-EXL3-Decoder)
 
 The legacy 3 bpw and 4 bpw decoders were quantized with ExLlamaV3's default calibration data. The `train-clean-100` variants were calibrated on LibriSpeech `train-clean-100` and are tuned for LibriSpeech-style English read speech; for general-purpose audio and Chinese ASR the legacy decoders remain the default recommendation.
