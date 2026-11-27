@@ -59,7 +59,7 @@ jobs:
         shell: pwsh
         run: |
           python -m pip install --disable-pip-version-check "huggingface_hub" "transformers>=5.13,<6" torch
-          python -c "from huggingface_hub import snapshot_download; snapshot_download('Qwen/Qwen3-ASR-0.6B-hf', allow_patterns=['*.json', '*.txt'], local_dir='.ci/qwen3-asr-0.6b-hf')"
+          python -c "from huggingface_hub import snapshot_download; snapshot_download('Qwen/Qwen3-ASR-0.6B-hf', allow_patterns=['*.json', '*.txt', '*.jinja'], local_dir='.ci/qwen3-asr-0.6b-hf')"
           python native/tools/gen_assets.py --model .ci/qwen3-asr-0.6b-hf --out native/assets
 
       - name: Configure
